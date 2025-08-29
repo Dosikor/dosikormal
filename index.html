@@ -69,14 +69,24 @@
   </style>
 </head>
 <body>
-  <h1>Мой стильный сайт</h1>
-  <div class="social-container">
-    <button class="social-btn">Соцсети</button>
-    <div class="social-links">
-      <a href="https://instagram.com/dosikramo" target="_blank">Instagram</a>
-      <a href="https://t.me/@Hahahden" target="_blank">Telegram</a>
+  <div class="container">
+    <button class="btn" id="showInstagram">Показать Instagram</button>
+
+    <div class="instagram-popup" id="instagramPopup">
+      <a href="https://instagram.com/dosikramo" target="_blank">
+        <img src="https://cdn-icons-png.flaticon.com/512/2111/2111463.png" alt="Instagram">
+        Перейти в Instagram
+      </a>
     </div>
   </div>
+
+  <script>
+    const btn = document.getElementById("showInstagram");
+    const popup = document.getElementById("instagramPopup");
+
+    btn.addEventListener("click", () => {
+      popup.classList.toggle("active");
+    });
+  </script>
 </body>
-</html>
-</html>
+
