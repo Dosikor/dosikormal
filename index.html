@@ -2,75 +2,79 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Мои соцсети</title>
+  <title>Мой сайт</title>
   <style>
     body {
       font-family: Arial, sans-serif;
-      background: linear-gradient(135deg, #6a11cb, #2575fc);
-      color: white;
       text-align: center;
-      padding: 50px;
+      background: #f4f4f4;
+      margin: 0;
+      padding: 0;
     }
+
     h1 {
-      font-size: 2.2em;
-    }
-    button {
       margin-top: 20px;
-      padding: 12px 20px;
-      font-size: 18px;
-      border: none;
-      border-radius: 10px;
+    }
+
+    button {
+      padding: 10px 20px;
+      margin-top: 20px;
+      font-size: 16px;
       cursor: pointer;
-      background: #ffcc00;
-      color: black;
-      font-weight: bold;
-      transition: 0.3s;
+      border: none;
+      background: #333;
+      color: #fff;
+      border-radius: 5px;
+      transition: background 0.3s;
     }
+
     button:hover {
-      background: #ffa500;
+      background: #555;
     }
-    #socials {
-      margin-top: 25px;
-      display: none; /* скрыт до нажатия кнопки */
+
+    #socialLinks {
+      display: none;
+      margin-top: 20px;
     }
-    #socials a {
+
+    .link {
       display: block;
-      margin: 10px auto;
-      width: 200px;
-      color: white;
-      text-decoration: none;
+      margin: 10px 0;
       font-size: 18px;
-      background: rgba(255,255,255,0.2);
-      padding: 10px;
-      border-radius: 8px;
-      transition: 0.3s;
+      color: #333;
+      text-decoration: none;
+      font-weight: bold;
+      position: relative;
+      overflow: hidden;
     }
-    #socials a:hover {
-      background: rgba(255,255,255,0.4);
+
+    /* Анимация появления снизу */
+    .link::after {
+      content: attr(data-text);
+      position: absolute;
+      left: 0;
+      bottom: -100%;
+      width: 100%;
+      color: #e1306c; /* например, для Instagram розовый */
+      transition: bottom 0.4s ease;
+    }
+
+    .link:hover::after {
+      bottom: 0;
     }
   </style>
 </head>
 <body>
-  <h1>Добро пожаловать 👋</h1>
-  <p>Нажми кнопку, чтобы открыть мои соцсети:</p>
-  <button onclick="toggleLinks()">Показать / скрыть ссылки</button>
+  <h1>Добро пожаловать!</h1>
+  <button onclick="showLinks()">Показать мои соц. сети</button>
 
-  <!-- Блок с соцсетями -->
-  <div id="socials">
-    <!-- 🔹 здесь меняй ссылки на свои -->
-     <a href="https://t.me/@dosiikor" target="_blank">Telegram</a>
-    <a href="https://instagram.com/dosikramo" target="_blank">Instagram</a>
-    <a href="https://youtube.com/@dosikor" target="_blank">YouTube</a>
+  <div id="socialLinks">
+    <a href="https://instagram.com/dosikramo" target="_blank" class="link" data-text="Instagram">Instagram</a>
   </div>
 
   <script>
-    function toggleLinks() {
-      let block = document.getElementById("socials");
-      if (block.style.display === "none") {
-        block.style.display = "block"; // показываем
-      } else {
-        block.style.display = "none"; // скрываем
-      }
+    function showLinks() {
+      document.getElementById("socialLinks").style.display = "block";
     }
   </script>
 </body>
