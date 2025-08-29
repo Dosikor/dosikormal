@@ -2,80 +2,81 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
-  <title>Мой сайт</title>
+  <title>Мой современный сайт</title>
   <style>
     body {
-      font-family: Arial, sans-serif;
-      text-align: center;
-      background: #f4f4f4;
       margin: 0;
-      padding: 0;
+      font-family: Arial, sans-serif;
+      background-color: #111;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 40px 20px;
     }
-
     h1 {
+      font-size: 3em;
+      letter-spacing: 2px;
+      margin-bottom: 50px;
+    }
+    .social-container {
+      position: relative;
       margin-top: 20px;
     }
-
-    button {
-      padding: 10px 20px;
-      margin-top: 20px;
-      font-size: 16px;
+    .social-btn {
+      background: none;
+      border: 2px solid #eee;
+      padding: 15px 30px;
+      font-size: 1.2em;
+      color: #eee;
+      text-transform: uppercase;
       cursor: pointer;
-      border: none;
-      background: #333;
-      color: #fff;
-      border-radius: 5px;
+      transition: background 0.3s, color 0.3s;
+    }
+    .social-btn:hover {
+      background: #eee;
+      color: #111;
+    }
+    .social-links {
+      position: absolute;
+      bottom: -120px;
+      left: 50%;
+      transform: translateX(-50%);
+      opacity: 0;
+      visibility: hidden;
+      transition: bottom 0.5s ease, opacity 0.5s ease;
+    }
+    .social-container:hover .social-links {
+      bottom: -10px;
+      opacity: 1;
+      visibility: visible;
+    }
+    .social-links a {
+      display: block;
+      color: #eee;
+      text-decoration: none;
+      margin: 10px 0;
+      font-size: 1.1em;
+      background: #222;
+      padding: 10px 20px;
+      border-radius: 20px;
       transition: background 0.3s;
     }
-
-    button:hover {
-      background: #555;
-    }
-
-    #socialLinks {
-      display: none;
-      margin-top: 20px;
-    }
-
-    .link {
-      display: block;
-      margin: 10px 0;
-      font-size: 18px;
-      color: #333;
-      text-decoration: none;
-      font-weight: bold;
-      position: relative;
-      overflow: hidden;
-    }
-
-    /* Анимация появления снизу */
-    .link::after {
-      content: attr(data-text);
-      position: absolute;
-      left: 0;
-      bottom: -100%;
-      width: 100%;
-      color: #e1306c; /* например, для Instagram розовый */
-      transition: bottom 0.4s ease;
-    }
-
-    .link:hover::after {
-      bottom: 0;
+    .social-links a:hover {
+      background: #444;
     }
   </style>
 </head>
 <body>
-  <h1>Добро пожаловать!</h1>
-  <button onclick="showLinks()">Показать мои соц. сети</button>
-
-  <div id="socialLinks">
-    <a href="https://instagram.com/dosikramo" target="_blank" class="link" data-text="Instagram">Instagram</a>
+  <h1>Мой стильный сайт</h1>
+  <div class="social-container">
+    <button class="social-btn">Соцсети</button>
+    <div class="social-links">
+      <a href="https://instagram.com/dosikramo" target="_blank">Instagram</a>
+      <a href="https://t.me/@Hahahden" target="_blank">Telegram</a>
+    </div>
   </div>
-
-  <script>
-    function showLinks() {
-      document.getElementById("socialLinks").style.display = "block";
-    }
-  </script>
 </body>
+</html>
 </html>
