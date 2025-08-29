@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>Мои соцсети</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: linear-gradient(135deg, #6a11cb, #2575fc);
+      color: white;
+      text-align: center;
+      padding: 50px;
+    }
+    h1 {
+      font-size: 2.2em;
+    }
+    button {
+      margin-top: 20px;
+      padding: 12px 20px;
+      font-size: 18px;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      background: #ffcc00;
+      color: black;
+      font-weight: bold;
+      transition: 0.3s;
+    }
+    button:hover {
+      background: #ffa500;
+    }
+    #socials {
+      margin-top: 25px;
+      display: none; /* скрыт до нажатия кнопки */
+    }
+    #socials a {
+      display: block;
+      margin: 10px auto;
+      width: 200px;
+      color: white;
+      text-decoration: none;
+      font-size: 18px;
+      background: rgba(255,255,255,0.2);
+      padding: 10px;
+      border-radius: 8px;
+      transition: 0.3s;
+    }
+    #socials a:hover {
+      background: rgba(255,255,255,0.4);
+    }
+  </style>
+</head>
+<body>
+  <h1>Добро пожаловать 👋</h1>
+  <p>Нажми кнопку, чтобы открыть мои соцсети:</p>
+  <button onclick="toggleLinks()">Показать / скрыть ссылки</button>
+
+  <!-- Блок с соцсетями -->
+  <div id="socials">
+    <!-- 🔹 здесь меняй ссылки на свои -->
+     <a href="https://t.me/@dosiikor" target="_blank">Telegram</a>
+    <a href="https://instagram.com/dosikramo" target="_blank">Instagram</a>
+    <a href="https://youtube.com/@dosikor" target="_blank">YouTube</a>
+  </div>
+
+  <script>
+    function toggleLinks() {
+      let block = document.getElementById("socials");
+      if (block.style.display === "none") {
+        block.style.display = "block"; // показываем
+      } else {
+        block.style.display = "none"; // скрываем
+      }
+    }
+  </script>
+</body>
+</html>
