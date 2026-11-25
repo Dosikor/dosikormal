@@ -69,7 +69,7 @@ public class MainActivity extends Activity {
         ll.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("🎱 Pool Линейка 4.0");
+        title.setText("🎱 Pool Линейка 4.1");
         title.setTextSize(26);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         ll.addView(title);

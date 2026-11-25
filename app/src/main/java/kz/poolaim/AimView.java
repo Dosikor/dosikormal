@@ -5,6 +5,7 @@ import android.graphics.Canvas;
 import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -43,9 +44,19 @@ public class AimView extends View {
     boolean powerAuto = true;
     float powerManual = 0.5f;
 
-    // Продолжение линии прицела игры.
-    private float guideAng = Float.NaN;
+    // Продолжение линии прицела игры: цель (от службы) и плавно догоняющий её показанный угол.
+    private float guideTarget = Float.NaN, guideDisp = Float.NaN;
     private Geo.Prediction pred;
+    private float predAlpha = 0f;
+
+    // Плавность: подсказки бледнеют, пока шары катятся; время прошлого кадра анимации.
+    private float suggAlpha = 1f, suggTarget = 1f;
+    private long lastAnim;
+
+    // «Липкий» выбор: какой шар выделен и какая луза выбрана у каждого шара (чтобы не прыгало).
+    private boolean hlValid;
+    private float hlX, hlY;
+    private List<float[]> choiceMem = new ArrayList<>(); // x, y, ключ удара
 
     private List<Geo.Shot> perBall = new ArrayList<>(); // лучший удар для каждого шара, от простого к сложному
     private int sel = 0;
@@ -70,8 +81,8 @@ public class AimView extends View {
         pObjFaint = stroke(0x8800E676, 2f);
         pObjFaint.setPathEffect(new DashPathEffect(new float[]{3 * dp, 5 * dp}, 0));
         pAim = stroke(0xFFFFEE58, 2f);
-        pGhost = stroke(0xFFFFFFFF, 2.2f);
-        pDot = fill(0xFFFFFFFF);
+        pGhost = stroke(0xFFFFF59D, 2.2f);
+        pDot = fill(0xFFFFF59D);
         pCue = stroke(0xFF40C4FF, 2f);
         pCue.setPathEffect(new DashPathEffect(new float[]{10 * dp, 6 * dp}, 0));
         pCueBad = stroke(0xFFFF5252, 2.5f);
@@ -90,13 +101,13 @@ public class AimView extends View {
         pHandle = fill(0xCCFFC107);
         pCal = stroke(0xFFFFC107, 2f);
         pAlt = stroke(0x99FFEE58, 1.2f);
-        pBounce = fill(0xFFFFFFFF);
+        pBounce = fill(0xFFFFF59D);
         pPredCue = stroke(0xFFFFC400, 2.5f);
         pPredObj = stroke(0xFFFF9100, 3f);
         pPredAfter = stroke(0xFFE040FB, 2.2f);
         pPredAfter.setPathEffect(new DashPathEffect(new float[]{9 * dp, 6 * dp}, 0));
         pPredGhost = stroke(0xFFFFC400, 2.2f);
-        pAltGhost = stroke(0x99FFFFFF, 1.5f);
+        pAltGhost = stroke(0x99FFF59D, 1.5f);
         pAltObj = stroke(0x9900E676, 2f);
         pRing = stroke(0x99FFFFFF, 1.2f);
         pRingStripe = stroke(0x99FFFFFF, 1.2f);
@@ -204,12 +215,19 @@ public class AimView extends View {
         invalidate();
     }
 
-    /** Направление линии прицела игры (радианы) или NaN. */
+    /** Направление линии прицела игры (радианы) или NaN. Показ догоняет его плавно. */
     void setGuide(float ang) {
-        if (Float.isNaN(ang) && Float.isNaN(guideAng)) return;
-        if (!Float.isNaN(ang) && !Float.isNaN(guideAng) && Math.abs(ang - guideAng) < 1e-4f) return;
-        guideAng = ang;
-        computePrediction();
+        if (Float.isNaN(ang) && Float.isNaN(guideTarget)) return;
+        if (!Float.isNaN(ang) && !Float.isNaN(guideTarget) && Math.abs(ang - guideTarget) < 1e-4f) return;
+        guideTarget = ang;
+        invalidate();
+    }
+
+    /** Шары катятся — подсказки плавно бледнеют, пока всё не остановится. */
+    void setMoving(boolean m) {
+        float t = m ? 0.3f : 1f;
+        if (t == suggTarget) return;
+        suggTarget = t;
         invalidate();
     }
 
@@ -237,9 +255,9 @@ public class AimView extends View {
 
     private void computePrediction() {
         pred = null;
-        if (Float.isNaN(guideAng) || !tableReady || cueIdx < 0 || cueIdx >= balls.size()) return;
+        if (Float.isNaN(guideDisp) || !tableReady || cueIdx < 0 || cueIdx >= balls.size()) return;
         Geo.Ball c = balls.get(cueIdx);
-        pred = Geo.predict(c.x, c.y, (float) Math.cos(guideAng), (float) Math.sin(guideAng), otherBalls(),
+        pred = Geo.predict(c.x, c.y, (float) Math.cos(guideDisp), (float) Math.sin(guideDisp), otherBalls(),
                 L, T, R, B, r, powerAuto ? -1f : powerManual, dmax());
     }
 
@@ -254,23 +272,55 @@ public class AimView extends View {
         selManual = sel != 0;
         selX = perBall.get(sel).ox;
         selY = perBall.get(sel).oy;
+        hlValid = true;
+        hlX = selX;
+        hlY = selY;
         notifyPower();
         invalidate();
     }
+
+    private static final float STICKY = 10f; // насколько новый вариант должен быть лучше, чтобы сменить старый
 
     void recompute() {
         perBall = new ArrayList<>();
         if (tableReady && cueIdx >= 0 && cueIdx < balls.size()) {
             List<Geo.Shot> all = Geo.computeAll(L, T, R, B, r, balls, cueIdx, filter, banks, dmax());
-            boolean[] used = new boolean[balls.size()];
-            for (Geo.Shot s : all) {
-                if (s.obj < 0 || used[s.obj]) continue;
-                used[s.obj] = true;
-                perBall.add(s);
+            Geo.Shot[] best = new Geo.Shot[balls.size()];
+            for (Geo.Shot s : all) if (s.obj >= 0 && best[s.obj] == null) best[s.obj] = s;
+            List<float[]> mem = new ArrayList<>();
+            for (int i = 0; i < best.length; i++) {
+                if (best[i] == null) continue;
+                Geo.Shot chosen = best[i];
+                Geo.Ball b = balls.get(i);
+                // Если раньше у этого шара была выбрана другая луза и она почти так же хороша — оставляем её.
+                for (float[] m : choiceMem) {
+                    if (Math.hypot(m[0] - b.x, m[1] - b.y) > 0.6f * r) continue;
+                    for (Geo.Shot s : all) {
+                        if (s.obj == i && s.key().hashCode() == (int) m[2] && s.score <= best[i].score + STICKY) {
+                            chosen = s;
+                            break;
+                        }
+                    }
+                    break;
+                }
+                perBall.add(chosen);
+                mem.add(new float[]{b.x, b.y, chosen.key().hashCode()});
             }
+            choiceMem = mem;
+            java.util.Collections.sort(perBall, (a, c) -> Float.compare(a.score, c.score));
         }
         computePrediction();
         sel = 0;
+        if (!selManual && hlValid) {
+            // Выделенный шар меняем, только если другой заметно проще.
+            for (int i = 0; i < perBall.size(); i++) {
+                Geo.Shot s = perBall.get(i);
+                if (Math.hypot(s.ox - hlX, s.oy - hlY) < 0.6f * r) {
+                    if (s.score <= perBall.get(0).score + STICKY) sel = i;
+                    break;
+                }
+            }
+        }
         if (selManual) {
             int idx = -1;
             for (int i = 0; i < perBall.size(); i++) {
@@ -287,6 +337,11 @@ public class AimView extends View {
             } else {
                 selManual = false;
             }
+        }
+        if (!perBall.isEmpty()) {
+            hlValid = true;
+            hlX = perBall.get(sel).ox;
+            hlY = perBall.get(sel).oy;
         }
         notifyPower();
         invalidate();
@@ -345,8 +400,61 @@ public class AimView extends View {
 
     // ---------------------------------------------------------------- рисование
 
+    /** Зона вокруг битка, где игра рисует свою белую линию прицела: туда мы ничего не рисуем. */
+    private float guideZone() {
+        return 6.6f * r;
+    }
+
+    /** Шаг плавной анимации: угол линии прицела и прозрачность догоняют цель. true — ещё не догнали. */
+    private boolean animate() {
+        long now = SystemClock.uptimeMillis();
+        float dt = lastAnim == 0 ? 0.016f : Math.min(0.1f, (now - lastAnim) / 1000f);
+        lastAnim = now;
+        boolean more = false;
+        // Угол линии прицела.
+        if (!Float.isNaN(guideTarget)) {
+            if (Float.isNaN(guideDisp)) {
+                guideDisp = guideTarget;
+                computePrediction();
+            } else {
+                double d = Math.atan2(Math.sin(guideTarget - guideDisp), Math.cos(guideTarget - guideDisp));
+                if (Math.abs(d) > 0.0004) {
+                    float k = (float) (1 - Math.exp(-dt / 0.06));
+                    guideDisp += (float) d * k;
+                    computePrediction();
+                    more = true;
+                } else if (guideDisp != guideTarget) {
+                    guideDisp = guideTarget;
+                    computePrediction();
+                }
+            }
+        }
+        // Продолжение линии прицела плавно появляется/гаснет.
+        float pt = Float.isNaN(guideTarget) ? 0f : 1f;
+        if (Math.abs(pt - predAlpha) > 0.01f) {
+            predAlpha += (pt - predAlpha) * (float) (1 - Math.exp(-dt / 0.12));
+            more = true;
+        } else {
+            predAlpha = pt;
+            if (pt == 0f && !Float.isNaN(guideDisp)) {
+                guideDisp = Float.NaN;
+                pred = null;
+            }
+        }
+        // Подсказки бледнеют, пока шары катятся.
+        if (Math.abs(suggTarget - suggAlpha) > 0.01f) {
+            suggAlpha += (suggTarget - suggAlpha) * (float) (1 - Math.exp(-dt / 0.15));
+            more = true;
+        } else {
+            suggAlpha = suggTarget;
+        }
+        return more;
+    }
+
     @Override
     protected void onDraw(Canvas c) {
+        if (animate()) postInvalidateOnAnimation();
+        else lastAnim = 0;
         if (calib && tableReady) {
             drawCalib(c);
             return;
@@ -397,11 +505,15 @@ public class AimView extends View {
             return;
         }
 
+        int layer = suggAlpha < 0.99f
+                ? c.saveLayerAlpha(0, 0, getWidth(), getHeight(), Math.round(255 * suggAlpha)) : -1;
+        float zone = guideZone();
+
         // Линия для каждого шара: куда целиться и в какую лузу.
         for (int i = 0; i < perBall.size(); i++) {
             if (i == sel) continue;
             Geo.Shot a = perBall.get(i);
-            drawPoly(c, trimEnd(trimStart(a.cuePath, r + 3 * dp), r), pAlt);
+            drawPoly(c, trimEnd(trimDist(a.cuePath, zone), r), pAlt);
             bounces(c, a.cuePath);
             c.drawCircle(a.gx, a.gy, r, pAltGhost);
             drawPoly(c, trimStart(a.objPath, r + 3 * dp), pAltObj);
@@ -423,10 +535,10 @@ public class AimView extends View {
         }
 
         if (cue.shortOfObject) {
-            drawPoly(c, trimStart(cue.pts, r + 3 * dp), pBad);
+            drawPoly(c, trimDist(cue.pts, zone), pBad);
             cross(c, cue.pts[cue.pts.length - 2], cue.pts[cue.pts.length - 1], r * 0.6f, pBad);
         } else {
-            drawPoly(c, trimEnd(trimStart(s.cuePath, r + 3 * dp), r), pAim);
+            drawPoly(c, trimEnd(trimDist(s.cuePath, zone), r), pAim);
             bounces(c, s.cuePath);
         }
         c.drawCircle(s.gx, s.gy, r, pGhost);
@@ -450,16 +562,23 @@ public class AimView extends View {
         if (s.cueCush > 0) via += " · биток через борт";
         labelAt(c, Math.round(s.cut) + "°" + via
                 + "   сила " + pct(p) + "   " + (sel + 1) + "/" + perBall.size(), s.ox, s.oy, warn);
+        if (layer >= 0) c.restoreToCount(layer);
 
         drawPrediction(c);
     }
 
     /** Продолжение линии прицела игры: куда пойдёт биток, какой шар заденет, куда тот покатится. */
     private void drawPrediction(Canvas c) {
-        if (pred == null || cueIdx < 0) return;
-        Geo.Ball cb = balls.get(cueIdx);
+        if (pred == null || cueIdx < 0 || predAlpha < 0.02f) return;
+        int layer = predAlpha < 0.99f
+                ? c.saveLayerAlpha(0, 0, getWidth(), getHeight(), Math.round(255 * predAlpha)) : -1;
+        drawPredictionInner(c);
+        if (layer >= 0) c.restoreToCount(layer);
+    }
+
+    private void drawPredictionInner(Canvas c) {
         // Начало не рисуем (там линия самой игры — по ней мы и определяем направление).
-        float skip = 6.5f * r;
+        float skip = guideZone();
         drawPoly(c, trimDist(pred.cuePath, skip), pPredCue);
         bounces(c, pred.cuePath);
         if (pred.hitBall) {
@@ -489,10 +608,14 @@ public class AimView extends View {
         }
     }
 
-    /** Белые точки в местах отскока от бортов. */
+    /** Точки в местах отскока от бортов (кроме зоны линии прицела игры вокруг битка). */
     private void bounces(Canvas c, float[] pts) {
         if (pts == null) return;
-        for (int i = 2; i + 3 < pts.length; i += 2) c.drawCircle(pts[i], pts[i + 1], 2.5f * dp, pBounce);
+        float cx = cueX(), cy = cueY(), z = guideZone();
+        for (int i = 2; i + 3 < pts.length; i += 2) {
+            if (!Float.isNaN(cx) && Math.hypot(pts[i] - cx, pts[i + 1] - cy) < z) continue;
+            c.drawCircle(pts[i], pts[i + 1], 2.5f * dp, pBounce);
+        }
     }
 
     /** Ломаная без последних d пикселей. */

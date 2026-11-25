@@ -93,6 +93,7 @@ public class OverlayService extends Service
         }
     };
     private int noTableCount;
+    private int calmScans = 2;
 
     // Стол.
     private boolean calReady, manualCal;
@@ -107,7 +108,7 @@ public class OverlayService extends Service
             if (grabber == null) return;
             if (!calib && !scanning) {
                 long now = SystemClock.uptimeMillis();
-                if (!calReady || (!manualCal && now - lastTableScan > 15000)) startTableScan();
+                if (!calReady || (!manualCal && noTableCount >= 6 && now - lastTableScan > 3000)) startTableScan();
                 else startScan();
             }
             main.postDelayed(this, 700);
@@ -380,7 +381,8 @@ public class OverlayService extends Service
             return;
         }
         float[] cur = {aim.L, aim.T, aim.R, aim.B, aim.r};
-        if (!calReady || !similar(cur, nt, 0.02f)) {
+        // Найденный стол не трогаем, пока он виден: меняем только если стол пропадал (другой экран/стол).
+        if (!calReady || (noTableCount >= 6 && !similar(cur, nt, 0.02f))) {
             float[] avg = new float[5];
             for (int i = 0; i < 5; i++) avg[i] = (cand[i] + nt[i]) / 2f;
             aim.setTable(avg[0], avg[1], avg[2], avg[3], avg[4]);
@@ -448,8 +450,8 @@ public class OverlayService extends Service
         guideBusy = false;
         if (grabber == null) return;
         if (Float.isNaN(ang)) {
-            // Пара пропущенных кадров не гасит линию.
-            if (++guideMiss >= 4 && !Float.isNaN(guideAng)) {
+            // Пропуски не гасят линию сразу — только если линии игры нет ~2 секунды.
+            if (++guideMiss >= 13 && !Float.isNaN(guideAng)) {
                 guideAng = Float.NaN;
                 aim.setGuide(Float.NaN);
             }
@@ -457,8 +459,10 @@ public class OverlayService extends Service
         }
         guideMiss = 0;
         if (!Float.isNaN(guideAng)) {
-            double d = Math.abs(Math.atan2(Math.sin(ang - guideAng), Math.cos(ang - guideAng)));
-            if (d < Math.toRadians(0.25)) return; // дрожание — не перерисовываем
+            double d = Math.atan2(Math.sin(ang - guideAng), Math.cos(ang - guideAng));
+            if (Math.abs(d) < Math.toRadians(0.2)) return; // дрожание — не трогаем
+            // Сглаживание: большой поворот кия — сразу, мелкий — половиной шага.
+            ang = (float) (guideAng + (Math.abs(d) > Math.toRadians(3) ? d : 0.5 * d));
         }
         guideAng = ang;
         aim.setGuide(ang);
@@ -567,8 +571,8 @@ public class OverlayService extends Service
         scanning = false;
         if (grabber == null || calib) return;
         if (noTable) {
-            // Один «пустой» кадр (анимация, всплывашка) не стирает линии — только 3 подряд.
-            if (++noTableCount >= 3) {
+            // Всплывашки и анимации игры не стирают линии — только если стола нет ~4 секунды.
+            if (++noTableCount >= 6) {
                 tracker.clear();
                 aim.setDetected(new ArrayList<>(), -1);
                 aim.setStatus("Стол не виден");
@@ -577,20 +581,24 @@ public class OverlayService extends Service
             return;
         }
         if (found == null) return;
+        if (noTableCount >= 6) aim.setStatus(null);
         noTableCount = 0;
         // Трекинг: шар держится, пока его не видно 3 кадра подряд; мелкое дрожание гасится.
         tracker.update(found, cueIdx, aim.r);
         int[] co = new int[1];
         List<Geo.Ball> list = tracker.visible(co);
         cueIdx = co[0];
+        // Шары катятся — подсказки бледнеют и спокойно ждут остановки; 2 спокойные проверки — снова ярко.
+        if (tracker.isMoving()) calmScans = 0;
+        else calmScans++;
+        aim.setMoving(calmScans < 2);
         if (cueIdx >= 0) {
             prevCueX = list.get(cueIdx).x;
             prevCueY = list.get(cueIdx).y;
         }
         aim.setDetected(list, cueIdx);
-        int others = list.size() - (cueIdx >= 0 ? 1 : 0);
-        if (cueIdx < 0) aim.setStatus("Биток не найден · шаров: " + others);
-        else aim.setStatus("🎯 авто · шаров: " + others);
+        // Строка сверху — только когда что-то не так (чтобы ничего не мелькало).
+        aim.setStatus(cueIdx < 0 ? "Биток не найден" : null);
     }
 
     // ---------------------------------------------------------------- стол: хранение
