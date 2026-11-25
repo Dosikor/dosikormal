@@ -22,10 +22,16 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
+          cache-read-only: false
 
-      - name: Build APK
+      - name: Build APK (with retries if Maven Central is rate-limiting)
         shell: bash
-        run: gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build-log.txt
+        run: |
+          for i in 1 2 3 4; do
+            if gradle assembleDebug --no-daemon --stacktrace > build-log.txt 2>&1; then exit 0; fi
+            echo "attempt $i failed"; tail -3 build-log.txt; sleep $((i * 45))
+          done
+          exit 1
 
       - name: Publish APK and log to branch apk-out
         if: always()
