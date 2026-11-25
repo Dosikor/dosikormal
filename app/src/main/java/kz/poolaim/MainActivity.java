@@ -2,7 +2,9 @@ package kz.poolaim;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Typeface;
+import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -10,45 +12,53 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
 public class MainActivity extends Activity {
 
     static final String GAME = "com.miniclip.eightballpool";
+    private static final int REQ_CAPTURE = 7;
 
     private static final String HELP =
             "КАК ПОЛЬЗОВАТЬСЯ\n\n"
-                    + "1. Один раз настрой стол: в игре нажми ⚙ на панели. Перетащи жёлтые углы рамки "
-                    + "на края зелёного сукна (там, где начинаются бортики). Белый круг положи на любой шар "
-                    + "и жёлтой ручкой справа подгони размер. Нажми ✓.\n\n"
-                    + "2. Белое кольцо поставь на биток, жёлтое — на шар, который хочешь забить. "
-                    + "Кольца таскаются пальцем, можно хвататься за край кольца, чтобы видеть шар.\n\n"
-                    + "3. Зелёная линия — куда покатится шар (в какую лузу). "
-                    + "Белый круг — куда должен прийти биток в момент удара. "
-                    + "Наведи кий в игре так, чтобы кружок прицела игры совпал с белым кругом, и бей.\n\n"
-                    + "4. Голубой пунктир — куда уедет биток после удара (если бить без вращения). "
-                    + "Тап по белому кольцу — спрятать/показать его.\n\n"
-                    + "5. Число у шара — угол резки: зелёное — легко, жёлтое — средне, красное — сложно. "
-                    + "«2/5» — это второй из пяти вариантов.\n\n"
+                    + "1. Нажми «Запустить». Android спросит про запись экрана — выбери «Весь экран» и «Начать». "
+                    + "Запись нужна, чтобы линейка сама видела шары. Никуда не отправляется, всё считается на телефоне.\n\n"
+                    + "2. Один раз настрой стол: в игре нажми ⚙. Жёлтые углы рамки — на края зелёного сукна "
+                    + "(где начинаются бортики). Белый круг положи на любой шар и жёлтой ручкой подгони размер. Нажми ✓.\n\n"
+                    + "3. Автоприцел (🎯 зелёная): линейка сама находит биток (белое кольцо) и все шары, "
+                    + "и рисует самый простой удар:\n"
+                    + "• белая линия от битка к белому кругу — туда наводи кий: кружок прицела игры совмести с белым кругом;\n"
+                    + "• зелёная линия — куда пойдёт шар (в лузу);\n"
+                    + "• голубой пунктир — куда уедет биток и где остановится (красный — упадёт в лузу!);\n"
+                    + "• бледные линии — другие возможные удары.\n\n"
+                    + "4. СИЛА — шкала справа на панели. В режиме АВТО она показывает, с какой силой бить "
+                    + "(в процентах от полной шкалы силы в игре). Тап по шкале — ручной режим: веди пальцем вверх-вниз, "
+                    + "и линейка покажет, докатится ли шар и где встанет биток.\n\n"
                     + "КНОПКИ ПАНЕЛИ\n"
                     + "✥ — передвинуть панель\n"
-                    + "⟳ — другая луза (или тап по жёлтому кольцу)\n"
+                    + "🎯 — автоприцел вкл/выкл (выкл — ручной режим с кольцами)\n"
+                    + "⟳ — следующий вариант удара\n"
+                    + "В / ● / ◐ — целиться во все / только сплошные / только полосатые\n"
                     + "Б — добавить удары через борт\n"
                     + "⚙ — настройка стола\n"
-                    + "👁 — спрятать всё, чтобы не мешало\n"
+                    + "👁 — спрятать всё\n"
                     + "✕ — выключить\n\n"
-                    + "Если кольца или линии не ложатся на стол — заново сделай настройку ⚙ в той же "
-                    + "ориентации экрана, в которой играешь.\n\n"
+                    + "Если шары находятся неправильно — сделай заново ⚙ (рамку точно по сукну, круг точно по шару). "
+                    + "Если не находится какой-то шар или биток, выключи 🎯 и поставь кольца руками.\n\n"
                     + "Используй против бота / офлайн. В онлайне это нечестно по отношению к живым соперникам, "
                     + "а за сторонние программы аккаунт могут заблокировать.";
 
     private Button bPerm, bStart;
-    private TextView status;
+    private TextView status, dmaxLabel;
+    private SharedPreferences prefs;
+    private boolean launchGameAfter;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        prefs = getSharedPreferences("aim", MODE_PRIVATE);
         float dp = getResources().getDisplayMetrics().density;
         int pad = (int) (20 * dp);
 
@@ -57,7 +67,7 @@ public class MainActivity extends Activity {
         ll.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("🎱 Pool Линейка");
+        title.setText("🎱 Pool Линейка 2.0");
         title.setTextSize(26);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         ll.addView(title);
@@ -75,11 +85,45 @@ public class MainActivity extends Activity {
                 startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION));
             }
         });
-        bStart = addButton(ll, "2. Запустить линейку и открыть игру", v -> start());
+        bStart = addButton(ll, "2. Запустить линейку и открыть игру", v -> requestCapture(true));
         addButton(ll, "Выключить линейку", v -> {
             stopService(new Intent(this, OverlayService.class));
             v.postDelayed(this::refresh, 300);
         });
+
+        // Масштаб силы: насколько далеко катится биток при 100% силы (у разных киёв в игре разная сила).
+        dmaxLabel = new TextView(this);
+        dmaxLabel.setTextSize(15);
+        dmaxLabel.setPadding(0, (int) (18 * dp), 0, 0);
+        ll.addView(dmaxLabel);
+        SeekBar sb = new SeekBar(this);
+        sb.setMax(100);
+        float dmax = prefs.getFloat("dmax", 6f);
+        sb.setProgress(Math.round((dmax - 2f) * 10f));
+        updateDmaxLabel(dmax);
+        sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                float v = 2f + progress / 10f;
+                updateDmaxLabel(v);
+                if (fromUser) prefs.edit().putFloat("dmax", v).apply();
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar s) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar s) {
+            }
+        });
+        ll.addView(sb, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        TextView hint = new TextView(this);
+        hint.setTextSize(13);
+        hint.setText("Если на деле шары катятся дальше, чем рисует линейка, — двигай вправо; если ближе — влево. "
+                + "Зависит от силы твоего кия в игре.");
+        ll.addView(hint);
 
         TextView help = new TextView(this);
         help.setTextSize(15);
@@ -91,6 +135,26 @@ public class MainActivity extends Activity {
         ScrollView sv = new ScrollView(this);
         sv.addView(ll);
         setContentView(sv);
+
+        handleIntent(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIntent(intent);
+    }
+
+    private void handleIntent(Intent intent) {
+        if (intent != null && intent.getBooleanExtra("capture", false)) {
+            intent.removeExtra("capture");
+            requestCapture(true);
+        }
+    }
+
+    private void updateDmaxLabel(float v) {
+        dmaxLabel.setText(String.format(java.util.Locale.US, "Дальность удара на 100%% силы: %.1f длины стола", v));
     }
 
     private Button addButton(LinearLayout ll, String text, View.OnClickListener l) {
@@ -118,18 +182,51 @@ public class MainActivity extends Activity {
         else status.setText("Разрешение есть — жми «Запустить».");
     }
 
-    private void start() {
+    private void requestCapture(boolean launchGame) {
         if (!Settings.canDrawOverlays(this)) {
             refresh();
             return;
         }
-        startService(new Intent(this, OverlayService.class));
-        Intent game = getPackageManager().getLaunchIntentForPackage(GAME);
-        if (game != null) {
-            startActivity(game);
+        launchGameAfter = launchGame;
+        try {
+            MediaProjectionManager mpm = getSystemService(MediaProjectionManager.class);
+            startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE);
+        } catch (Exception e) {
+            startOverlay(0, null);
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_CAPTURE) return;
+        if (resultCode == RESULT_OK && data != null) {
+            startOverlay(resultCode, data);
         } else {
-            Toast.makeText(this, "Линейка запущена. Открой 8 Ball Pool сам.", Toast.LENGTH_LONG).show();
-            refresh();
+            startOverlay(0, null);
+            Toast.makeText(this, "Без записи экрана автоприцел не работает — ручной режим", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void startOverlay(int code, Intent data) {
+        Intent svc = new Intent(this, OverlayService.class);
+        if (data != null) {
+            svc.putExtra("code", code);
+            svc.putExtra("data", data);
+        }
+        startService(svc);
+        refresh();
+        if (launchGameAfter) {
+            launchGameAfter = false;
+            // Небольшая пауза, чтобы служба успела стартовать, пока мы на экране.
+            getWindow().getDecorView().postDelayed(() -> {
+                Intent game = getPackageManager().getLaunchIntentForPackage(GAME);
+                if (game != null) {
+                    startActivity(game);
+                } else {
+                    Toast.makeText(this, "Линейка запущена. Открой 8 Ball Pool сам.", Toast.LENGTH_LONG).show();
+                }
+            }, 800);
         }
     }
 }

@@ -10,8 +10,23 @@ android {
         applicationId 'kz.poolaim'
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName '1.0'
+        versionCode 2
+        versionName '2.0'
+    }
+
+    // Постоянный ключ подписи, чтобы новые версии ставились поверх старых.
+    signingConfigs {
+        stable {
+            storeFile file('poolaim.keystore')
+            storePassword 'poolaim-key'
+            keyAlias 'poolaim'
+            keyPassword 'poolaim-key'
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.stable
+        }
     }
 
     compileOptions {
