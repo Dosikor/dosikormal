@@ -406,7 +406,7 @@ public class AimView extends View {
     }
 
     /** Шаг плавной анимации: угол линии прицела и прозрачность догоняют цель. true — ещё не догнали. */
-    private boolean animate() {
+    private boolean stepAnimation() {
         long now = SystemClock.uptimeMillis();
         float dt = lastAnim == 0 ? 0.016f : Math.min(0.1f, (now - lastAnim) / 1000f);
         lastAnim = now;
@@ -453,7 +453,7 @@ public class AimView extends View {
 
     @Override
     protected void onDraw(Canvas c) {
-        if (animate()) postInvalidateOnAnimation();
+        if (stepAnimation()) postInvalidateOnAnimation();
         else lastAnim = 0;
         if (calib && tableReady) {
             drawCalib(c);
