@@ -31,7 +31,7 @@ public class AimView extends View {
     // Стол (внутренние края бортов) и радиус шара, в пикселях этого окна.
     float L, T, R, B, r;
     boolean tableReady;
-    boolean banks, calib, showCue = true;
+    boolean banks = true, calib, showCue = true;
     float sx, sy; // пробный шар в режиме ручной подстройки
 
     private List<Geo.Ball> balls = new ArrayList<>();
@@ -43,13 +43,18 @@ public class AimView extends View {
     boolean powerAuto = true;
     float powerManual = 0.5f;
 
+    // Продолжение линии прицела игры.
+    private float guideAng = Float.NaN;
+    private Geo.Prediction pred;
+
     private List<Geo.Shot> perBall = new ArrayList<>(); // лучший удар для каждого шара, от простого к сложному
     private int sel = 0;
     private boolean selManual;
     private float selX, selY;
 
     private final Paint pTable, pPocket, pObj, pObjFaint, pAim, pGhost, pDot, pCue, pCueBad, pText, pSmall, pHandle,
-            pCal, pAlt, pAltGhost, pAltObj, pRing, pRingStripe, pCueRing, pBad, pNoShot, pStop, pHit;
+            pCal, pAlt, pAltGhost, pAltObj, pRing, pRingStripe, pCueRing, pBad, pNoShot, pStop, pHit,
+            pBounce, pPredCue, pPredObj, pPredAfter, pPredGhost;
     private final Path path = new Path();
 
     private int drag = -1;
@@ -64,7 +69,7 @@ public class AimView extends View {
         pObj = stroke(0xFF00E676, 3f);
         pObjFaint = stroke(0x8800E676, 2f);
         pObjFaint.setPathEffect(new DashPathEffect(new float[]{3 * dp, 5 * dp}, 0));
-        pAim = stroke(0xFFFFFFFF, 1.8f);
+        pAim = stroke(0xFFFFEE58, 2f);
         pGhost = stroke(0xFFFFFFFF, 2.2f);
         pDot = fill(0xFFFFFFFF);
         pCue = stroke(0xFF40C4FF, 2f);
@@ -84,7 +89,13 @@ public class AimView extends View {
         pSmall.setShadowLayer(3 * dp, 0, 0, 0xFF000000);
         pHandle = fill(0xCCFFC107);
         pCal = stroke(0xFFFFC107, 2f);
-        pAlt = stroke(0x66FFFFFF, 1.2f);
+        pAlt = stroke(0x99FFEE58, 1.2f);
+        pBounce = fill(0xFFFFFFFF);
+        pPredCue = stroke(0xFFFFC400, 2.5f);
+        pPredObj = stroke(0xFFFF9100, 3f);
+        pPredAfter = stroke(0xFFE040FB, 2.2f);
+        pPredAfter.setPathEffect(new DashPathEffect(new float[]{9 * dp, 6 * dp}, 0));
+        pPredGhost = stroke(0xFFFFC400, 2.2f);
         pAltGhost = stroke(0x99FFFFFF, 1.5f);
         pAltObj = stroke(0x9900E676, 2f);
         pRing = stroke(0x99FFFFFF, 1.2f);
@@ -188,8 +199,48 @@ public class AimView extends View {
     void setPower(boolean autoPower, float manual) {
         powerAuto = autoPower;
         powerManual = manual;
+        computePrediction();
         notifyPower();
         invalidate();
+    }
+
+    /** Направление линии прицела игры (радианы) или NaN. */
+    void setGuide(float ang) {
+        if (Float.isNaN(ang) && Float.isNaN(guideAng)) return;
+        if (!Float.isNaN(ang) && !Float.isNaN(guideAng) && Math.abs(ang - guideAng) < 1e-4f) return;
+        guideAng = ang;
+        computePrediction();
+        invalidate();
+    }
+
+    float cueX() {
+        return cueIdx >= 0 && cueIdx < balls.size() ? balls.get(cueIdx).x : Float.NaN;
+    }
+
+    float cueY() {
+        return cueIdx >= 0 && cueIdx < balls.size() ? balls.get(cueIdx).y : Float.NaN;
+    }
+
+    /** Остальные шары (кроме битка): x0,y0,x1,y1,... */
+    float[] otherBalls() {
+        int n = 0;
+        float[] o = new float[2 * balls.size()];
+        for (int i = 0; i < balls.size(); i++) {
+            if (i == cueIdx) continue;
+            o[n++] = balls.get(i).x;
+            o[n++] = balls.get(i).y;
+        }
+        float[] res = new float[n];
+        System.arraycopy(o, 0, res, 0, n);
+        return res;
+    }
+
+    private void computePrediction() {
+        pred = null;
+        if (Float.isNaN(guideAng) || !tableReady || cueIdx < 0 || cueIdx >= balls.size()) return;
+        Geo.Ball c = balls.get(cueIdx);
+        pred = Geo.predict(c.x, c.y, (float) Math.cos(guideAng), (float) Math.sin(guideAng), otherBalls(),
+                L, T, R, B, r, powerAuto ? -1f : powerManual, dmax());
     }
 
     void toggleCuePath() {
@@ -218,6 +269,7 @@ public class AimView extends View {
                 perBall.add(s);
             }
         }
+        computePrediction();
         sel = 0;
         if (selManual) {
             int idx = -1;
@@ -341,6 +393,7 @@ public class AimView extends View {
             String msg = isBreak() ? "РАЗБОЙ: бей в первый шар, сила 100%"
                     : (banks ? "чистого удара нет — бей в ближний шар" : "чистого удара нет — нажми Б (через борт)");
             labelAt(c, msg, cueBall.x, cueBall.y, null);
+            drawPrediction(c);
             return;
         }
 
@@ -348,11 +401,11 @@ public class AimView extends View {
         for (int i = 0; i < perBall.size(); i++) {
             if (i == sel) continue;
             Geo.Shot a = perBall.get(i);
-            line(c, a.cx, a.cy, a.gx, a.gy, r + 3 * dp, r, pAlt);
+            drawPoly(c, trimEnd(trimStart(a.cuePath, r + 3 * dp), r), pAlt);
+            bounces(c, a.cuePath);
             c.drawCircle(a.gx, a.gy, r, pAltGhost);
-            drawPoly(c, trimStart(a.cushion >= 0
-                    ? new float[]{a.ox, a.oy, a.kx, a.ky, a.px, a.py}
-                    : new float[]{a.ox, a.oy, a.px, a.py}, r + 3 * dp), pAltObj);
+            drawPoly(c, trimStart(a.objPath, r + 3 * dp), pAltObj);
+            bounces(c, a.objPath);
         }
 
         Geo.Shot s = perBall.get(sel);
@@ -361,12 +414,9 @@ public class AimView extends View {
         Geo.Run obj = Geo.objectRun(s, p, dmax);
         Geo.Run cue = Geo.cueRun(s, p, dmax, L, T, R, B, r, obstaclesFor(s));
 
-        if (!obj.full) {
-            drawPoly(c, trimStart(s.cushion >= 0
-                    ? new float[]{s.ox, s.oy, s.kx, s.ky, s.px, s.py}
-                    : new float[]{s.ox, s.oy, s.px, s.py}, r + 3 * dp), pObjFaint);
-        }
+        if (!obj.full) drawPoly(c, trimStart(s.objPath, r + 3 * dp), pObjFaint);
         drawPoly(c, trimStart(obj.pts, r + 3 * dp), pObj);
+        bounces(c, s.objPath);
         c.drawCircle(s.px, s.py, r * 1.1f, obj.full ? pObj : pObjFaint);
         if (!obj.full && obj.pts.length >= 2) {
             cross(c, obj.pts[obj.pts.length - 2], obj.pts[obj.pts.length - 1], r * 0.6f, pBad);
@@ -376,13 +426,15 @@ public class AimView extends View {
             drawPoly(c, trimStart(cue.pts, r + 3 * dp), pBad);
             cross(c, cue.pts[cue.pts.length - 2], cue.pts[cue.pts.length - 1], r * 0.6f, pBad);
         } else {
-            line(c, s.cx, s.cy, s.gx, s.gy, r + 3 * dp, r, pAim);
+            drawPoly(c, trimEnd(trimStart(s.cuePath, r + 3 * dp), r), pAim);
+            bounces(c, s.cuePath);
         }
         c.drawCircle(s.gx, s.gy, r, pGhost);
         c.drawCircle(s.gx, s.gy, 1.8f * dp, pDot);
 
         if (showCue && !cue.shortOfObject && cue.pts.length >= 4) {
             drawPoly(c, cue.pts, cue.scratch ? pCueBad : pCue);
+            bounces(c, cue.pts);
             float ex = cue.pts[cue.pts.length - 2], ey = cue.pts[cue.pts.length - 1];
             c.drawCircle(ex, ey, r, cue.scratch ? pBad : pStop);
             if (cue.hit) c.drawCircle(cue.hitX, cue.hitY, r + 3 * dp, pHit);
@@ -394,8 +446,85 @@ public class AimView extends View {
         else if (!obj.full) warn = "слабо: шар не докатится (нужно ≥ " + pct(s.pmin) + ")";
         else if (cue.scratch && showCue) warn = "⚠ биток упадёт в лузу — ⟳ другой шар или сила";
         pText.setColor(col);
-        labelAt(c, Math.round(s.cut) + "°" + (s.cushion >= 0 ? " борт" : "")
+        String via = s.objCush == 1 ? " · борт" : s.objCush == 2 ? " · 2 борта" : "";
+        if (s.cueCush > 0) via += " · биток через борт";
+        labelAt(c, Math.round(s.cut) + "°" + via
                 + "   сила " + pct(p) + "   " + (sel + 1) + "/" + perBall.size(), s.ox, s.oy, warn);
+
+        drawPrediction(c);
+    }
+
+    /** Продолжение линии прицела игры: куда пойдёт биток, какой шар заденет, куда тот покатится. */
+    private void drawPrediction(Canvas c) {
+        if (pred == null || cueIdx < 0) return;
+        Geo.Ball cb = balls.get(cueIdx);
+        // Начало не рисуем (там линия самой игры — по ней мы и определяем направление).
+        float skip = 6.5f * r;
+        drawPoly(c, trimDist(pred.cuePath, skip), pPredCue);
+        bounces(c, pred.cuePath);
+        if (pred.hitBall) {
+            c.drawCircle(pred.gx, pred.gy, r, pPredGhost);
+            drawPoly(c, trimStart(pred.objPath, r + 3 * dp), pPredObj);
+            bounces(c, pred.objPath);
+            if (pred.cueAfter != null) {
+                drawPoly(c, pred.cueAfter, pred.scratch ? pCueBad : pPredAfter);
+                bounces(c, pred.cueAfter);
+            }
+            float[] op = pred.objPath;
+            if (pred.potted && op != null && op.length >= 2) {
+                float[] pk = Geo.pockets(L, T, R, B);
+                c.drawCircle(pk[2 * pred.pocket], pk[2 * pred.pocket + 1], r * 1.3f, pObj);
+            }
+            pText.setColor(pred.potted ? 0xFF69F0AE : 0xFFFF9100);
+            String t = pred.potted ? "✓ В ЛУЗУ" : "мимо";
+            if (pred.scratch) t += "  ⚠ биток в лузу";
+            float[] ob = otherBalls();
+            if (pred.hitIdx >= 0 && 2 * pred.hitIdx + 1 < ob.length) {
+                labelAt(c, t, ob[2 * pred.hitIdx], ob[2 * pred.hitIdx + 1] + 3.2f * r, null);
+            }
+        } else if (pred.scratch) {
+            pText.setColor(0xFFFF5252);
+            float[] cp = pred.cuePath;
+            labelAt(c, "⚠ биток в лузу", cp[cp.length - 2], cp[cp.length - 1], null);
+        }
+    }
+
+    /** Белые точки в местах отскока от бортов. */
+    private void bounces(Canvas c, float[] pts) {
+        if (pts == null) return;
+        for (int i = 2; i + 3 < pts.length; i += 2) c.drawCircle(pts[i], pts[i + 1], 2.5f * dp, pBounce);
+    }
+
+    /** Ломаная без последних d пикселей. */
+    private static float[] trimEnd(float[] pts, float d) {
+        if (pts == null || pts.length < 4) return pts;
+        int n = pts.length;
+        float dx = pts[n - 2] - pts[n - 4], dy = pts[n - 1] - pts[n - 3];
+        float l = (float) Math.hypot(dx, dy);
+        if (l <= d + 1) return n <= 4 ? new float[0] : java.util.Arrays.copyOf(pts, n - 2);
+        float[] o = pts.clone();
+        o[n - 2] = pts[n - 2] - dx / l * d;
+        o[n - 1] = pts[n - 1] - dy / l * d;
+        return o;
+    }
+
+    /** Ломаная, начиная с расстояния d вдоль неё. */
+    private static float[] trimDist(float[] pts, float d) {
+        if (pts == null || pts.length < 4) return new float[0];
+        float acc = 0;
+        for (int i = 0; i + 3 < pts.length; i += 2) {
+            float l = (float) Math.hypot(pts[i + 2] - pts[i], pts[i + 3] - pts[i + 1]);
+            if (acc + l > d) {
+                float t = (d - acc) / l;
+                float[] o = new float[pts.length - i];
+                o[0] = pts[i] + (pts[i + 2] - pts[i]) * t;
+                o[1] = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * t;
+                System.arraycopy(pts, i + 2, o, 2, pts.length - i - 2);
+                return o;
+            }
+            acc += l;
+        }
+        return new float[0];
     }
 
     private static String pct(float p) {

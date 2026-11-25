@@ -78,6 +78,20 @@ public class OverlayService extends Service
     private final Paint maskPaint = new Paint();
     private float prevCueX = -1, prevCueY = -1;
     private final Tracker tracker = new Tracker();
+
+    // Линия прицела игры.
+    private boolean guideBusy;
+    private int guideMiss;
+    private float guideAng = Float.NaN;
+
+    private final Runnable guideTick = new Runnable() {
+        @Override
+        public void run() {
+            if (grabber == null) return;
+            if (!calib && !hidden && !guideBusy && calReady) startGuideScan();
+            main.postDelayed(this, 150);
+        }
+    };
     private int noTableCount;
 
     // Стол.
@@ -148,6 +162,7 @@ public class OverlayService extends Service
     public void onDestroy() {
         running = false;
         main.removeCallbacks(scanTick);
+        main.removeCallbacks(guideTick);
         stopProjection();
         if (prefs != null) prefs.unregisterOnSharedPreferenceChangeListener(this);
         if (aimAdded) {
@@ -231,6 +246,8 @@ public class OverlayService extends Service
             forceScan = true;
             main.removeCallbacks(scanTick);
             main.post(scanTick);
+            main.removeCallbacks(guideTick);
+            main.postDelayed(guideTick, 300);
         } catch (Throwable t) {
             grabber = null;
             MediaProjection p0 = projection;
@@ -264,6 +281,8 @@ public class OverlayService extends Service
         if (which != projection || !running) return;
         stopProjection();
         main.removeCallbacks(scanTick);
+        main.removeCallbacks(guideTick);
+        aim.setGuide(Float.NaN);
         aim.setDetected(new ArrayList<>(), -1);
         aim.setStatus("Запись экрана остановлена — нажми 🎯");
     }
@@ -377,6 +396,72 @@ public class OverlayService extends Service
         }
         cand = null;
         forceScan = true;
+    }
+
+    // ---------------------------------------------------------------- линия прицела игры
+
+    /** Берём кусок экрана вокруг битка (в половинном разрешении) и ищем белую линию прицела игры. */
+    private void startGuideScan() {
+        final float cx = aim.cueX(), cy = aim.cueY();
+        if (Float.isNaN(cx) || aim.r <= 0) {
+            if (!Float.isNaN(guideAng)) {
+                guideAng = Float.NaN;
+                aim.setGuide(Float.NaN);
+            }
+            return;
+        }
+        final float r = aim.r;
+        final float step = 2f;
+        final int half = (int) Math.ceil(6.6f * r / step) + 4;
+        final int size = 2 * half;
+        final float sx0 = cx + aimLoc[0] - half * step, sy0 = cy + aimLoc[1] - half * step;
+        final float[] others = aim.otherBalls();
+        final float pr = r / step, pr0 = (r + 5 * dp) / step;
+        final float pcx = (cx + aimLoc[0] - sx0) / step - 0.5f, pcy = (cy + aimLoc[1] - sy0) / step - 0.5f;
+        final float[] pb = new float[others.length];
+        for (int i = 0; i + 1 < others.length; i += 2) {
+            pb[i] = (others[i] + aimLoc[0] - sx0) / step - 0.5f;
+            pb[i + 1] = (others[i + 1] + aimLoc[1] - sy0) / step - 0.5f;
+        }
+        final ScreenGrabber g = grabber;
+        guideBusy = true;
+        detectHandler.post(() -> {
+            float ang = Float.NaN;
+            try {
+                if (g.grab()) {
+                    int[] rgb = new int[size * size];
+                    for (int j = 0; j < size; j++) {
+                        float sy = sy0 + (j + 0.5f) * step;
+                        for (int i = 0; i < size; i++) rgb[j * size + i] = g.pixelAtScreen(sx0 + (i + 0.5f) * step, sy);
+                    }
+                    ang = GuideFinder.find(rgb, size, size, pcx, pcy, pr, pr0, pb, -1);
+                }
+            } catch (Throwable ignored) {
+                ang = Float.NaN;
+            }
+            final float fa = ang;
+            main.post(() -> onGuide(fa));
+        });
+    }
+
+    private void onGuide(float ang) {
+        guideBusy = false;
+        if (grabber == null) return;
+        if (Float.isNaN(ang)) {
+            // Пара пропущенных кадров не гасит линию.
+            if (++guideMiss >= 4 && !Float.isNaN(guideAng)) {
+                guideAng = Float.NaN;
+                aim.setGuide(Float.NaN);
+            }
+            return;
+        }
+        guideMiss = 0;
+        if (!Float.isNaN(guideAng)) {
+            double d = Math.abs(Math.atan2(Math.sin(ang - guideAng), Math.cos(ang - guideAng)));
+            if (d < Math.toRadians(0.25)) return; // дрожание — не перерисовываем
+        }
+        guideAng = ang;
+        aim.setGuide(ang);
     }
 
     // ---------------------------------------------------------------- поиск шаров
@@ -607,6 +692,10 @@ public class OverlayService extends Service
         if (!hidden && calib) toggleCalib();
         hidden = !hidden;
         aim.setVisibility(hidden ? View.INVISIBLE : View.VISIBLE);
+        if (hidden) {
+            guideAng = Float.NaN;
+            aim.setGuide(Float.NaN);
+        }
         bEye.setAlpha(hidden ? 0.4f : 1f);
     }
 
@@ -667,6 +756,7 @@ public class OverlayService extends Service
             aim.setBanks(!aim.banks);
             bBank.setTextColor(aim.banks ? 0xFF69F0AE : 0xFFFFFFFF);
         });
+        bBank.setTextColor(0xFF69F0AE);
         bCal = btn(c2, "⚙", v -> toggleCalib());
         bEye = btn(c2, "👁", v -> toggleHidden());
         btn(c2, "✕", v -> stopSelf());
