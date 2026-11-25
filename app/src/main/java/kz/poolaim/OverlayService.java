@@ -77,6 +77,8 @@ public class OverlayService extends Service
     private boolean[] prevMask;
     private final Paint maskPaint = new Paint();
     private float prevCueX = -1, prevCueY = -1;
+    private final Tracker tracker = new Tracker();
+    private int noTableCount;
 
     // Стол.
     private boolean calReady, manualCal;
@@ -288,6 +290,7 @@ public class OverlayService extends Service
         cand = null;
         if (curKey != null) prefs.edit().remove("c3_" + curKey + "_manual").apply();
         aim.clearTable();
+        tracker.clear();
         aim.setStatus("Ищу стол и шары…");
         lastTableScan = 0;
         forceScan = true;
@@ -362,6 +365,7 @@ public class OverlayService extends Service
             float[] avg = new float[5];
             for (int i = 0; i < 5; i++) avg[i] = (cand[i] + nt[i]) / 2f;
             aim.setTable(avg[0], avg[1], avg[2], avg[3], avg[4]);
+            tracker.clear();
             feltCb = t.feltCb;
             feltCr = t.feltCr;
             calReady = true;
@@ -478,27 +482,22 @@ public class OverlayService extends Service
         scanning = false;
         if (grabber == null || calib) return;
         if (noTable) {
-            aim.setDetected(new ArrayList<>(), -1);
-            aim.setStatus("Стол не виден");
-            lastTableScan = 0; // проверим, не сменился ли стол
+            // Один «пустой» кадр (анимация, всплывашка) не стирает линии — только 3 подряд.
+            if (++noTableCount >= 3) {
+                tracker.clear();
+                aim.setDetected(new ArrayList<>(), -1);
+                aim.setStatus("Стол не виден");
+                lastTableScan = 0; // проверим, не сменился ли стол
+            }
             return;
         }
         if (found == null) return;
-        // Сглаживание: если шар сдвинулся совсем чуть-чуть — оставляем прежнюю точку, чтобы линии не дрожали.
-        List<Geo.Ball> old = aim.getBalls();
-        List<Geo.Ball> list = new ArrayList<>();
-        float r = aim.r;
-        for (Detector.Blob b : found) {
-            float x = b.x, y = b.y;
-            for (Geo.Ball o : old) {
-                if (Math.hypot(o.x - x, o.y - y) < 0.35f * r) {
-                    x = o.x;
-                    y = o.y;
-                    break;
-                }
-            }
-            list.add(new Geo.Ball(x, y, b.type));
-        }
+        noTableCount = 0;
+        // Трекинг: шар держится, пока его не видно 3 кадра подряд; мелкое дрожание гасится.
+        tracker.update(found, cueIdx, aim.r);
+        int[] co = new int[1];
+        List<Geo.Ball> list = tracker.visible(co);
+        cueIdx = co[0];
         if (cueIdx >= 0) {
             prevCueX = list.get(cueIdx).x;
             prevCueY = list.get(cueIdx).y;
@@ -524,6 +523,7 @@ public class OverlayService extends Service
         if (key.equals(curKey)) return;
         curKey = key;
         cand = null;
+        tracker.clear();
         prevCueX = -1;
         prevCueY = -1;
         lastTableScan = 0;

@@ -139,6 +139,14 @@ public class AimView extends View {
     }
 
     void setDetected(List<Geo.Ball> list, int cue) {
+        if (cue == cueIdx && list.size() == balls.size()) {
+            boolean same = true;
+            for (int i = 0; i < list.size() && same; i++) {
+                Geo.Ball a = list.get(i), b = balls.get(i);
+                same = a.x == b.x && a.y == b.y && a.type == b.type;
+            }
+            if (same) return; // ничего не поменялось — не перерисовываем
+        }
         balls = list;
         cueIdx = cue;
         recompute();
@@ -326,7 +334,7 @@ public class AimView extends View {
             int near = nearestTarget();
             if (near >= 0) {
                 Geo.Ball nb = balls.get(near);
-                c.drawLine(cueBall.x, cueBall.y, nb.x, nb.y, pHit);
+                line(c, cueBall.x, cueBall.y, nb.x, nb.y, r + 3 * dp, r + 3 * dp, pHit);
                 c.drawCircle(nb.x, nb.y, r + 3 * dp, pHit);
             }
             pText.setColor(0xFFFFAB40);
@@ -340,13 +348,11 @@ public class AimView extends View {
         for (int i = 0; i < perBall.size(); i++) {
             if (i == sel) continue;
             Geo.Shot a = perBall.get(i);
-            c.drawLine(a.cx, a.cy, a.gx, a.gy, pAlt);
+            line(c, a.cx, a.cy, a.gx, a.gy, r + 3 * dp, r, pAlt);
             c.drawCircle(a.gx, a.gy, r, pAltGhost);
-            path.reset();
-            path.moveTo(a.ox, a.oy);
-            if (a.cushion >= 0) path.lineTo(a.kx, a.ky);
-            path.lineTo(a.px, a.py);
-            c.drawPath(path, pAltObj);
+            drawPoly(c, trimStart(a.cushion >= 0
+                    ? new float[]{a.ox, a.oy, a.kx, a.ky, a.px, a.py}
+                    : new float[]{a.ox, a.oy, a.px, a.py}, r + 3 * dp), pAltObj);
         }
 
         Geo.Shot s = perBall.get(sel);
@@ -356,23 +362,21 @@ public class AimView extends View {
         Geo.Run cue = Geo.cueRun(s, p, dmax, L, T, R, B, r, obstaclesFor(s));
 
         if (!obj.full) {
-            path.reset();
-            path.moveTo(s.ox, s.oy);
-            if (s.cushion >= 0) path.lineTo(s.kx, s.ky);
-            path.lineTo(s.px, s.py);
-            c.drawPath(path, pObjFaint);
+            drawPoly(c, trimStart(s.cushion >= 0
+                    ? new float[]{s.ox, s.oy, s.kx, s.ky, s.px, s.py}
+                    : new float[]{s.ox, s.oy, s.px, s.py}, r + 3 * dp), pObjFaint);
         }
-        drawPoly(c, obj.pts, pObj);
+        drawPoly(c, trimStart(obj.pts, r + 3 * dp), pObj);
         c.drawCircle(s.px, s.py, r * 1.1f, obj.full ? pObj : pObjFaint);
         if (!obj.full && obj.pts.length >= 2) {
             cross(c, obj.pts[obj.pts.length - 2], obj.pts[obj.pts.length - 1], r * 0.6f, pBad);
         }
 
         if (cue.shortOfObject) {
-            drawPoly(c, cue.pts, pBad);
+            drawPoly(c, trimStart(cue.pts, r + 3 * dp), pBad);
             cross(c, cue.pts[cue.pts.length - 2], cue.pts[cue.pts.length - 1], r * 0.6f, pBad);
         } else {
-            c.drawLine(s.cx, s.cy, s.gx, s.gy, pAim);
+            line(c, s.cx, s.cy, s.gx, s.gy, r + 3 * dp, r, pAim);
         }
         c.drawCircle(s.gx, s.gy, r, pGhost);
         c.drawCircle(s.gx, s.gy, 1.8f * dp, pDot);
@@ -404,6 +408,33 @@ public class AimView extends View {
         path.moveTo(pts[0], pts[1]);
         for (int i = 2; i + 1 < pts.length; i += 2) path.lineTo(pts[i], pts[i + 1]);
         c.drawPath(path, p);
+    }
+
+    /** Линия, укороченная на a от начала и на b от конца — чтобы не рисовать поверх шаров. */
+    private void line(Canvas c, float x0, float y0, float x1, float y1, float a, float b, Paint p) {
+        float dx = x1 - x0, dy = y1 - y0;
+        float l = (float) Math.hypot(dx, dy);
+        if (l <= a + b + 1) return;
+        dx /= l;
+        dy /= l;
+        c.drawLine(x0 + dx * a, y0 + dy * a, x1 - dx * b, y1 - dy * b, p);
+    }
+
+    /** Ломаная без первых d пикселей. */
+    private static float[] trimStart(float[] pts, float d) {
+        if (pts == null || pts.length < 4) return pts;
+        float dx = pts[2] - pts[0], dy = pts[3] - pts[1];
+        float l = (float) Math.hypot(dx, dy);
+        float[] o = pts.clone();
+        if (l <= d + 1) {
+            if (pts.length <= 4) return new float[0];
+            float[] rest = new float[pts.length - 2];
+            System.arraycopy(pts, 2, rest, 0, rest.length);
+            return rest;
+        }
+        o[0] = pts[0] + dx / l * d;
+        o[1] = pts[1] + dy / l * d;
+        return o;
     }
 
     private void cross(Canvas c, float x, float y, float k, Paint p) {

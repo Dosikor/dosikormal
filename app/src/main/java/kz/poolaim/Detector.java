@@ -194,7 +194,7 @@ final class Detector {
             }
             if (tot < 4) continue;
             int kn = tot - unk;
-            if (unk > 0.4f * tot) continue;
+            if (unk > 0.65f * tot) continue;
             if (kn > 0 && ball < 0.75f * kn) continue;
 
             Blob bl = new Blob();
@@ -327,7 +327,7 @@ final class Detector {
                 }
             }
             int kn = tot - unk;
-            if (kn < 0.6f * tot || kn < 4) continue;
+            if (kn < 0.35f * tot || kn < 4) continue;
             float fill = (float) ballPx / kn;
             float meanLr = (float) sumY / kn / Math.max(12, fy);
             boolean ringLike = ringTot > 0 && ringBright > 0.35f * ringTot && fill < 0.35f;
