@@ -44,7 +44,7 @@ public class OverlayService extends Service
 
     static volatile boolean running;
     static final float RA = 7f;       // радиус шара в пикселях сетки анализа шаров
-    static final int TABLE_STEP = 4;  // шаг сетки поиска стола, пикселей экрана
+    static final int TABLE_STEP = 2;  // шаг сетки поиска стола, пикселей экрана
 
     private static final String NEED_CAPTURE = "Нажми 🎯 и разреши запись экрана («Весь экран»)";
 
@@ -58,7 +58,7 @@ public class OverlayService extends Service
     private boolean aimAdded;
     private LinearLayout panel;
     private WindowManager.LayoutParams panelLp;
-    private TextView bFilter, bBank, bCal, bEye;
+    private TextView bFilter, bBank, bCal, bEye, bSugg;
     private PowerBar powerBar;
 
     private final int[] aimLoc = new int[2];
@@ -760,6 +760,12 @@ public class OverlayService extends Service
         btn(c1, "🎯", v -> restartAuto());
         btn(c1, "⟳", v -> aim.nextShot());
         bFilter = btn(c1, "В", v -> cycleFilter());
+        bSugg = btn(c2, "💡", v -> {
+            aim.setShowSugg(!aim.showSugg);
+            bSugg.setAlpha(aim.showSugg ? 1f : 0.45f);
+            toast(aim.showSugg ? "Подсказки к каждому шару: вкл" : "Подсказки выкл — только прицел игры с физикой");
+        });
+        bSugg.setAlpha(0.45f);
         bBank = btn(c2, "Б", v -> {
             aim.setBanks(!aim.banks);
             bBank.setTextColor(aim.banks ? 0xFF69F0AE : 0xFFFFFFFF);

@@ -27,11 +27,17 @@ final class Geo {
     static final class Ball {
         float x, y;
         int type;
+        int color; // цвет шара 0xAARRGGBB (0 — неизвестен)
 
         Ball(float x, float y, int type) {
             this.x = x;
             this.y = y;
             this.type = type;
+        }
+
+        Ball(float x, float y, int type, int color) {
+            this(x, y, type);
+            this.color = color;
         }
     }
 

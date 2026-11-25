@@ -33,6 +33,7 @@ public class AimView extends View {
     float L, T, R, B, r;
     boolean tableReady;
     boolean banks = true, calib, showCue = true;
+    boolean showSugg = false; // подсказки «линия к каждому шару» (по умолчанию — чистый экран, как в видео)
     float sx, sy; // пробный шар в режиме ручной подстройки
 
     private List<Geo.Ball> balls = new ArrayList<>();
@@ -46,7 +47,8 @@ public class AimView extends View {
 
     // Продолжение линии прицела игры: цель (от службы) и плавно догоняющий её показанный угол.
     private float guideTarget = Float.NaN, guideDisp = Float.NaN;
-    private Geo.Prediction pred;
+    private Sim.Result sim;          // симуляция удара по линии прицела игры
+    private float[] simX, simY;      // положения шаров, для которых считали
     private float predAlpha = 0f;
 
     // Плавность: подсказки бледнеют, пока шары катятся; время прошлого кадра анимации.
@@ -65,7 +67,7 @@ public class AimView extends View {
 
     private final Paint pTable, pPocket, pObj, pObjFaint, pAim, pGhost, pDot, pCue, pCueBad, pText, pSmall, pHandle,
             pCal, pAlt, pAltGhost, pAltObj, pRing, pRingStripe, pCueRing, pBad, pNoShot, pStop, pHit,
-            pBounce, pPredCue, pPredObj, pPredAfter, pPredGhost;
+            pBounce, pPredCue, pPredObj, pPredAfter, pPredGhost, pSim, pSimDot, pSimDotEdge, pSimRing;
     private final Path path = new Path();
 
     private int drag = -1;
@@ -107,6 +109,10 @@ public class AimView extends View {
         pPredAfter = stroke(0xFFE040FB, 2.2f);
         pPredAfter.setPathEffect(new DashPathEffect(new float[]{9 * dp, 6 * dp}, 0));
         pPredGhost = stroke(0xFFFFC400, 2.2f);
+        pSim = stroke(0xFFFFFFFF, 2.6f);
+        pSimDot = fill(0xFFFFFFFF);
+        pSimDotEdge = stroke(0xCC000000, 1.2f);
+        pSimRing = stroke(0xFFFFFFFF, 3f);
         pAltGhost = stroke(0x99FFF59D, 1.5f);
         pAltObj = stroke(0x9900E676, 2f);
         pRing = stroke(0x99FFFFFF, 1.2f);
@@ -254,11 +260,25 @@ public class AimView extends View {
     }
 
     private void computePrediction() {
-        pred = null;
+        sim = null;
         if (Float.isNaN(guideDisp) || !tableReady || cueIdx < 0 || cueIdx >= balls.size()) return;
-        Geo.Ball c = balls.get(cueIdx);
-        pred = Geo.predict(c.x, c.y, (float) Math.cos(guideDisp), (float) Math.sin(guideDisp), otherBalls(),
-                L, T, R, B, r, powerAuto ? -1f : powerManual, dmax());
+        int n = balls.size();
+        simX = new float[n];
+        simY = new float[n];
+        for (int i = 0; i < n; i++) {
+            simX[i] = balls.get(i).x;
+            simY[i] = balls.get(i).y;
+        }
+        sim = Sim.run(simX, simY, cueIdx, (float) Math.cos(guideDisp), (float) Math.sin(guideDisp), power(),
+                L, T, R, B, r, dmax());
+    }
+
+    void setShowSugg(boolean on) {
+        showSugg = on;
+        selManual = false;
+        notifyPower();
+        computePrediction();
+        invalidate();
     }
 
     void toggleCuePath() {
@@ -367,8 +387,11 @@ public class AimView extends View {
         return best;
     }
 
+    /** Сила: ручная — как на шкале; АВТО — 100% на разбое, по подсказке (если включены) или 70%. */
     private float power() {
-        if (perBall.isEmpty()) return powerAuto ? (cueIdx >= 0 && isBreak() ? 1f : 0f) : powerManual;
+        if (!powerAuto) return powerManual;
+        if (cueIdx >= 0 && isBreak()) return 1f;
+        if (!showSugg || perBall.isEmpty()) return 0.7f;
         return powerAuto ? perBall.get(sel).recPower() : powerManual;
     }
 
@@ -412,22 +435,9 @@ public class AimView extends View {
         lastAnim = now;
         boolean more = false;
         // Угол линии прицела.
-        if (!Float.isNaN(guideTarget)) {
-            if (Float.isNaN(guideDisp)) {
-                guideDisp = guideTarget;
-                computePrediction();
-            } else {
-                double d = Math.atan2(Math.sin(guideTarget - guideDisp), Math.cos(guideTarget - guideDisp));
-                if (Math.abs(d) > 0.0004) {
-                    float k = (float) (1 - Math.exp(-dt / 0.06));
-                    guideDisp += (float) d * k;
-                    computePrediction();
-                    more = true;
-                } else if (guideDisp != guideTarget) {
-                    guideDisp = guideTarget;
-                    computePrediction();
-                }
-            }
+        if (!Float.isNaN(guideTarget) && guideDisp != guideTarget) {
+            guideDisp = guideTarget;
+            computePrediction();
         }
         // Продолжение линии прицела плавно появляется/гаснет.
         float pt = Float.isNaN(guideTarget) ? 0f : 1f;
@@ -438,7 +448,7 @@ public class AimView extends View {
             predAlpha = pt;
             if (pt == 0f && !Float.isNaN(guideDisp)) {
                 guideDisp = Float.NaN;
-                pred = null;
+                sim = null;
             }
         }
         // Подсказки бледнеют, пока шары катятся.
@@ -478,7 +488,10 @@ public class AimView extends View {
                 continue;
             }
             boolean on = Geo.typeMatches(b.type, filter);
-            if (on && !hasShot[i] && cueIdx >= 0) {
+            if (!showSugg) {
+                pRing.setAlpha(0x55);
+                c.drawCircle(b.x, b.y, r + 1.5f * dp, pRing);
+            } else if (on && !hasShot[i] && cueIdx >= 0) {
                 c.drawCircle(b.x, b.y, r + 2 * dp, pNoShot);
             } else {
                 Paint p = b.type == Geo.STRIPE ? pRingStripe : pRing;
@@ -489,6 +502,10 @@ public class AimView extends View {
         if (cueIdx < 0) return;
 
         Geo.Ball cueBall = balls.get(cueIdx);
+        if (!showSugg) {
+            drawPrediction(c);
+            return;
+        }
         if (perBall.isEmpty()) {
             // Чистого удара нет (например, разбой): показываем ближайший шар.
             int near = nearestTarget();
@@ -569,7 +586,7 @@ public class AimView extends View {
 
     /** Продолжение линии прицела игры: куда пойдёт биток, какой шар заденет, куда тот покатится. */
     private void drawPrediction(Canvas c) {
-        if (pred == null || cueIdx < 0 || predAlpha < 0.02f) return;
+        if (sim == null || cueIdx < 0 || predAlpha < 0.02f) return;
         int layer = predAlpha < 0.99f
                 ? c.saveLayerAlpha(0, 0, getWidth(), getHeight(), Math.round(255 * predAlpha)) : -1;
         drawPredictionInner(c);
@@ -577,35 +594,108 @@ public class AimView extends View {
     }
 
     private void drawPredictionInner(Canvas c) {
-        // Начало не рисуем (там линия самой игры — по ней мы и определяем направление).
-        float skip = guideZone();
-        drawPoly(c, trimDist(pred.cuePath, skip), pPredCue);
-        bounces(c, pred.cuePath);
-        if (pred.hitBall) {
-            c.drawCircle(pred.gx, pred.gy, r, pPredGhost);
-            drawPoly(c, trimStart(pred.objPath, r + 3 * dp), pPredObj);
-            bounces(c, pred.objPath);
-            if (pred.cueAfter != null) {
-                drawPoly(c, pred.cueAfter, pred.scratch ? pCueBad : pPredAfter);
-                bounces(c, pred.cueAfter);
+        Sim.Result sm = sim;
+        if (sm == null || simX == null) return;
+        float cx = cueX(), cy = cueY(), zone = guideZone();
+        float[] pk = Geo.pockets(L, T, R, B);
+        int potted = 0;
+        // Пути всех шаров — каждый своим цветом (как в видео); у битка — белый.
+        for (int i = 0; i < sm.paths.length; i++) {
+            float[] p = sm.paths[i];
+            if (p == null) continue;
+            int col = i == cueIdx ? 0xFFFFFFFF : visible(colorOf(i));
+            pSim.setColor(col);
+            pSim.setStrokeWidth((i == cueIdx ? 2.2f : 2.6f) * dp);
+            drawPolyZ(c, i == cueIdx ? p : trimStart(p, r + 2 * dp), pSim, cx, cy, zone);
+            // Где остановится — точка цвета шара; если упадёт — кольцо у лузы.
+            if (sm.potted[i]) {
+                if (i != cueIdx) potted++;
+                pSimRing.setColor(i == cueIdx ? 0xFFFF5252 : col);
+                int q = sm.pocketOf[i];
+                c.drawCircle(pk[2 * q], pk[2 * q + 1], r * 1.25f, pSimRing);
+            } else if (Math.hypot(sm.fx[i] - cx, sm.fy[i] - cy) > zone || i != cueIdx) {
+                pSimDot.setColor(col);
+                c.drawCircle(sm.fx[i], sm.fy[i], 0.5f * r, pSimDot);
+                c.drawCircle(sm.fx[i], sm.fy[i], 0.5f * r, pSimDotEdge);
             }
-            float[] op = pred.objPath;
-            if (pred.potted && op != null && op.length >= 2) {
-                float[] pk = Geo.pockets(L, T, R, B);
-                c.drawCircle(pk[2 * pred.pocket], pk[2 * pred.pocket + 1], r * 1.3f, pObj);
-            }
-            pText.setColor(pred.potted ? 0xFF69F0AE : 0xFFFF9100);
-            String t = pred.potted ? "✓ В ЛУЗУ" : "мимо";
-            if (pred.scratch) t += "  ⚠ биток в лузу";
-            float[] ob = otherBalls();
-            if (pred.hitIdx >= 0 && 2 * pred.hitIdx + 1 < ob.length) {
-                labelAt(c, t, ob[2 * pred.hitIdx], ob[2 * pred.hitIdx + 1] + 3.2f * r, null);
-            }
-        } else if (pred.scratch) {
-            pText.setColor(0xFFFF5252);
-            float[] cp = pred.cuePath;
-            labelAt(c, "⚠ биток в лузу", cp[cp.length - 2], cp[cp.length - 1], null);
         }
+        // Подпись у первого задетого шара.
+        String t = null;
+        int tc = 0xFF69F0AE;
+        if (sm.cuePotted) {
+            t = "⚠ биток в лузу";
+            tc = 0xFFFF5252;
+        } else if (sm.firstHit >= 0 && sm.potted[sm.firstHit]) {
+            t = potted > 1 ? "✓ В ЛУЗУ  (забьёт: " + potted + ")" : "✓ В ЛУЗУ";
+        } else if (potted > 0) {
+            t = "забьёт: " + potted;
+        } else if (sm.firstHit >= 0) {
+            t = "мимо";
+            tc = 0xFFFF9100;
+        }
+        if (t != null) {
+            pText.setColor(tc);
+            float lx = sm.firstHit >= 0 ? simX[sm.firstHit] : cx, ly = sm.firstHit >= 0 ? simY[sm.firstHit] : cy;
+            labelAt(c, t + "   сила " + pct(power()), lx, ly + 3.2f * r, null);
+        }
+    }
+
+    private int colorOf(int i) {
+        if (i < 0 || i >= balls.size()) return 0xFFFFFFFF;
+        Geo.Ball b = balls.get(i);
+        if (b.color != 0) return b.color;
+        return b.type == Geo.EIGHT ? 0xFF202020 : b.type == Geo.STRIPE ? 0xFFFFD54F : 0xFFFF7043;
+    }
+
+    /** Цвет линии: слишком тёмные чуть осветляем, чтобы были видны на сукне. */
+    private static int visible(int c) {
+        int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+        int y = (299 * r + 587 * g + 114 * b) / 1000;
+        if (y < 50) {
+            r = Math.min(255, r + 40);
+            g = Math.min(255, g + 40);
+            b = Math.min(255, b + 40);
+        }
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+
+    /** Ломаная без частей внутри круга (cx,cy,R) — там игра рисует свою линию прицела. */
+    private void drawPolyZ(Canvas c, float[] pts, Paint p, float cx, float cy, float R) {
+        if (pts == null || pts.length < 4) return;
+        if (Float.isNaN(cx)) {
+            drawPoly(c, pts, p);
+            return;
+        }
+        path.reset();
+        boolean open = false;
+        for (int i = 0; i + 3 < pts.length; i += 2) {
+            float x0 = pts[i], y0 = pts[i + 1], x1 = pts[i + 2], y1 = pts[i + 3];
+            float dx = x1 - x0, dy = y1 - y0;
+            float fx = x0 - cx, fy = y0 - cy;
+            float a = dx * dx + dy * dy, b = 2 * (fx * dx + fy * dy), cc = fx * fx + fy * fy - R * R;
+            float t0 = 0, t1 = 1; // внутренняя часть отрезка [ti0, ti1]
+            float ti0 = 2, ti1 = -1;
+            float disc = b * b - 4 * a * cc;
+            if (a > 1e-6f && disc > 0) {
+                float sq = (float) Math.sqrt(disc);
+                ti0 = (-b - sq) / (2 * a);
+                ti1 = (-b + sq) / (2 * a);
+            }
+            // Видимые куски: [0, ti0] и [ti1, 1].
+            float[][] parts = {{t0, Math.min(t1, ti0)}, {Math.max(t0, ti1), t1}};
+            if (ti0 > ti1 || ti1 < 0 || ti0 > 1) parts = new float[][]{{0, 1}};
+            for (float[] pr : parts) {
+                if (pr[1] - pr[0] <= 1e-4f) {
+                    open = false;
+                    continue;
+                }
+                float ax = x0 + dx * pr[0], ay = y0 + dy * pr[0], bx = x0 + dx * pr[1], by = y0 + dy * pr[1];
+                if (!open || pr[0] > 1e-4f) path.moveTo(ax, ay);
+                path.lineTo(bx, by);
+                open = pr[1] >= 1 - 1e-4f;
+            }
+        }
+        c.drawPath(path, p);
     }
 
     /** Точки в местах отскока от бортов (кроме зоны линии прицела игры вокруг битка). */

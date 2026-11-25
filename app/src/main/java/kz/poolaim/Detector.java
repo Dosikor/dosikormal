@@ -22,6 +22,7 @@ final class Detector {
         float white;     // доля белых пикселей
         float dark;      // доля тёмных пикселей
         int type = Geo.SOLID;
+        int color;       // основной цвет шара (для линий)
     }
 
     static List<Blob> detect(int[] rgb, int w, int h, boolean[] unknown, float ra) {
@@ -51,29 +52,40 @@ final class Detector {
         if (known < n / 4) return res;
         int fy = median(hy, known), fb = median(hb, known), fr = median(hr, known);
 
-        // Локальная яркость сукна (виньетка/освещение): средняя яркость «сукноподобных» пикселей в блоках.
+        // Локальный цвет сукна по блокам (к бортам сукно сильно темнеет): «сукноподобные» — тот же оттенок.
+        double fHue = Math.atan2(fr - 128, fb - 128);
+        float fRatio = (float) Math.hypot(fr - 128, fb - 128) / Math.max(10, fy);
         int bs = Math.max(8, Math.round(ra * 2.5f));
         int bw = (w + bs - 1) / bs, bh = (h + bs - 1) / bs;
-        float[] blockY = new float[bw * bh];
+        float[] blockY = new float[bw * bh], blockB = new float[bw * bh], blockR = new float[bw * bh];
         for (int by = 0; by < bh; by++) {
             for (int bx = 0; bx < bw; bx++) {
-                long sum = 0;
+                long sum = 0, sb = 0, sr = 0;
                 int cnt = 0;
                 for (int y = by * bs; y < Math.min(h, (by + 1) * bs); y++) {
                     for (int x = bx * bs; x < Math.min(w, (bx + 1) * bs); x++) {
                         int i = y * w + x;
                         if (unknown != null && unknown[i]) continue;
-                        int db = Cb[i] - fb, dr = Cr[i] - fr;
-                        if (db * db + dr * dr < 100 && Y[i] > fy * 0.35f && Y[i] < fy * 1.7f) {
+                        if (TableFinder.feltLike(Y[i], Cb[i], Cr[i], fHue, fRatio, fy) && Y[i] > fy * 0.25f) {
                             sum += Y[i];
+                            sb += Cb[i];
+                            sr += Cr[i];
                             cnt++;
                         }
                     }
                 }
-                blockY[by * bw + bx] = cnt > bs * bs / 6 ? (float) sum / cnt : -1f;
+                int k = by * bw + bx;
+                if (cnt > bs * bs / 6) {
+                    blockY[k] = (float) sum / cnt;
+                    blockB[k] = (float) sb / cnt;
+                    blockR[k] = (float) sr / cnt;
+                } else {
+                    blockY[k] = fy;
+                    blockB[k] = fb;
+                    blockR[k] = fr;
+                }
             }
         }
-        for (int i = 0; i < blockY.length; i++) if (blockY[i] < 0) blockY[i] = fy;
 
         // Классификация пикселей: 0 — сукно, 1 — шар, 2 — неизвестно (наши линии).
         byte[] cls = new byte[n];
@@ -84,9 +96,10 @@ final class Detector {
                     cls[i] = 2;
                     continue;
                 }
-                float ly = Math.max(12f, blockY[(y / bs) * bw + (x / bs)]);
+                int bk = (y / bs) * bw + (x / bs);
+                float ly = Math.max(12f, blockY[bk]);
                 float lr = Y[i] / ly;
-                int db = Cb[i] - fb, dr = Cr[i] - fr;
+                float db = Cb[i] - blockB[bk], dr = Cr[i] - blockR[bk];
                 boolean chroma = db * db + dr * dr > 18 * 18;
                 cls[i] = (byte) ((chroma || lr > 1.42f || lr < 0.5f) ? 1 : 0);
             }
@@ -208,10 +221,54 @@ final class Detector {
             na++;
         }
 
+        for (Blob b : res) b.color = ballColor(rgb, w, h, cls, b.x, b.y, ra);
+
         // Второй проход: шары, цвет которых почти как у сукна (зелёный на зелёном, полосатый с зелёной полосой),
         // ищем по круглому контуру (преобразование Хафа с известным радиусом).
+        int before = res.size();
         houghPass(rgb, w, h, unknown, ra, Y, Cb, Cr, cls, fy, res, ax, ay, na);
+        for (int i = before; i < res.size(); i++) {
+            Blob b = res.get(i);
+            b.color = ballColor(rgb, w, h, null, b.x, b.y, ra);
+        }
         return res;
+    }
+
+    /** Основной цвет шара: среднее насыщенных пикселей (полоса у полосатых); белый/чёрный — если таких мало. */
+    static int ballColor(int[] rgb, int w, int h, byte[] cls, float cx, float cy, float ra) {
+        long sr = 0, sg = 0, sb = 0;
+        int cnt = 0, white = 0, dark = 0, tot = 0;
+        int rr = (int) Math.ceil(ra);
+        float rad2 = 0.8f * ra * 0.8f * ra;
+        int x0 = Math.round(cx), y0 = Math.round(cy);
+        for (int yy = Math.max(0, y0 - rr); yy <= Math.min(h - 1, y0 + rr); yy++) {
+            for (int xx = Math.max(0, x0 - rr); xx <= Math.min(w - 1, x0 + rr); xx++) {
+                float dx = xx - cx, dy = yy - cy;
+                if (dx * dx + dy * dy > rad2) continue;
+                int i = yy * w + xx;
+                if (cls != null && cls[i] == 2) continue;
+                int c = rgb[i];
+                int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+                int mx = Math.max(r, Math.max(g, b)), mn = Math.min(r, Math.min(g, b));
+                int y = (299 * r + 587 * g + 114 * b) / 1000;
+                tot++;
+                if (y > 125 && mx - mn < 55) {
+                    white++;
+                } else if (y < 45 && mx - mn < 30) {
+                    dark++;
+                } else if (mx - mn >= 45) {
+                    sr += r;
+                    sg += g;
+                    sb += b;
+                    cnt++;
+                }
+            }
+        }
+        if (tot == 0) return 0xFFFFFFFF;
+        if (cnt >= Math.max(3, tot / 6)) {
+            return 0xFF000000 | ((int) (sr / cnt) << 16) | ((int) (sg / cnt) << 8) | (int) (sb / cnt);
+        }
+        return dark > white ? 0xFF202020 : 0xFFFFFFFF;
     }
 
     private static void houghPass(int[] rgb, int w, int h, boolean[] unknown, float ra,
@@ -332,7 +389,7 @@ final class Detector {
             float meanLr = (float) sumY / kn / Math.max(12, fy);
             boolean ringLike = ringTot > 0 && ringBright > 0.35f * ringTot && fill < 0.35f;
             if (ringLike) continue;
-            if (fill < 0.3f && meanLr > 0.85f) continue; // внутри обычное сукно — это не шар
+            if (fill < 0.35f && meanLr > 0.65f) continue; // внутри обычное сукно (или тень) — это не шар
             float wsum = 0, wx = 0, wy = 0;
             for (int yy = Math.max(0, y - 2); yy <= Math.min(h - 1, y + 2); yy++)
                 for (int xx = Math.max(0, x - 2); xx <= Math.min(w - 1, x + 2); xx++) {

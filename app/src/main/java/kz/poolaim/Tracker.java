@@ -26,6 +26,7 @@ final class Tracker {
         int hits, misses;
         int cueStreak, notCueStreak;
         final int[] typeVotes = new int[4];
+        int color;
 
         void resetWindow(float px, float py) {
             wn = 0;
@@ -124,6 +125,8 @@ final class Tracker {
             }
             t.hits = Math.min(t.hits + 1, 1000);
             t.misses = 0;
+            if (d.color != 0 && t.color == 0) t.color = d.color;
+            else if (d.color != 0 && t.hits % 5 == 0) t.color = d.color;
             if (di == cueIdx) {
                 t.cueStreak++;
                 t.notCueStreak = 0;
@@ -145,6 +148,7 @@ final class Tracker {
             t.y = d.y;
             t.resetWindow(d.x, d.y);
             t.hits = 1;
+            t.color = d.color;
             if (i == cueIdx) t.cueStreak = 1;
             else if (d.type >= 0 && d.type < 4) t.typeVotes[d.type]++;
             tracks.add(t);
@@ -179,7 +183,7 @@ final class Tracker {
                     }
                 }
             }
-            out.add(new Geo.Ball(t.x, t.y, type));
+            out.add(new Geo.Ball(t.x, t.y, type, type == Geo.CUE ? 0xFFFFFFFF : t.color));
         }
         return out;
     }

@@ -64,10 +64,13 @@ final class TableFinder {
         // Слишком серое «сукно» (меню, тёмный фон) — не стол.
         if ((fCb - 128) * (fCb - 128) + (fCr - 128) * (fCr - 128) < 6 * 6) return null;
 
+        // Сукно: тот же оттенок (угол цветности), яркость может сильно падать к бортам (тень/виньетка).
+        double fHue = Math.atan2(fCr - 128, fCb - 128);
+        float fCh = (float) Math.hypot(fCr - 128, fCb - 128);
+        float fRatio = fCh / Math.max(10, fY);
         boolean[] felt = new boolean[n];
         for (int i = 0; i < n; i++) {
-            int db = Cb[i] - fCb, dr = Cr[i] - fCr;
-            felt[i] = db * db + dr * dr < 16 * 16 && Y[i] > fY * 0.45f && Y[i] < fY * 1.7f;
+            felt[i] = feltLike(Y[i], Cb[i], Cr[i], fHue, fRatio, fY);
         }
 
         // 2) Заливка от ближайшего к центру пикселя сукна.
@@ -198,24 +201,45 @@ final class TableFinder {
      */
     private static float refine(int[] Y, boolean[] comp, int w, int edge, int dir, int band, int a, int b,
                                 int mid, int midHalf, boolean horizontal, int fY, float def) {
-        int len = band + 3;
+        // Средняя яркость каждой строки/столбца (все пиксели) от чуть снаружи края до band внутрь.
+        int out = Math.max(2, band / 2);
+        int len = band + out + 3;
         float[] m = new float[len];
+        int h = Y.length / w;
         for (int k = 0; k < len; k++) {
-            int pos = edge + dir * k;
+            int pos = edge + dir * (k - out);
             long s = 0;
             int c = 0;
             for (int t = a; t <= b; t++) {
                 if (mid >= 0 && Math.abs(t - mid) < midHalf) continue;
-                int i = horizontal ? pos * w + t : t * w + pos;
-                if (i < 0 || i >= comp.length || !comp[i]) continue;
-                s += Y[i];
+                int xx = horizontal ? t : pos, yy = horizontal ? pos : t;
+                if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+                s += Y[yy * w + xx];
                 c++;
             }
             m[k] = c > 0 ? (float) s / c : -1;
         }
+        // 1) Тонкая тёмная линия (тень под носом борта): темнее соседей с обеих сторон.
+        int dk = -1;
+        float best = Float.MAX_VALUE;
+        for (int k = 3; k + 3 < len; k++) {
+            if (m[k] < 0 || m[k - 3] < 0 || m[k + 3] < 0) continue;
+            float side = Math.min(Math.max(m[k - 3], m[k - 2]), Math.max(m[k + 3], m[k + 2]));
+            if (m[k] < 0.6f * side && m[k] < best) {
+                best = m[k];
+                dk = k;
+            }
+        }
+        if (dk >= 0) {
+            // Край сукна — сразу за тёмной линией (со стороны стола).
+            int k2 = dk;
+            while (k2 + 1 < len && m[k2 + 1] >= 0 && m[k2 + 1] < 0.6f * Math.max(m[Math.min(len - 1, dk + 3)], 1)) k2++;
+            return edge + dir * (k2 - out + 1);
+        }
+        // 2) Иначе — самый резкий перепад яркости.
         float bestD = 0.04f * fY;
         int bestK = -1;
-        for (int k = 1; k + 1 < len; k++) {
+        for (int k = out + 1; k + 1 < len; k++) {
             if (m[k - 1] < 0 || m[k + 1] < 0) continue;
             float d = Math.abs(m[k + 1] - m[k - 1]);
             if (d > bestD) {
@@ -224,7 +248,18 @@ final class TableFinder {
             }
         }
         if (bestK < 0) return def;
-        return edge + dir * bestK;
+        return edge + dir * (bestK - out);
+    }
+
+    static boolean feltLike(int y, int cb, int cr, double fHue, float fRatio, int fY) {
+        if (y < 15 || y > fY * 1.8f) return false;
+        float ch = (float) Math.hypot(cr - 128, cb - 128);
+        if (ch < 5) return false;
+        double dh = Math.abs(Math.atan2(cr - 128, cb - 128) - fHue);
+        if (dh > Math.PI) dh = 2 * Math.PI - dh;
+        if (dh > Math.toRadians(15)) return false;
+        float ratio = ch / Math.max(10, y);
+        return ratio > 0.5f * fRatio && ratio < 2f * fRatio;
     }
 
     /** Доля пикселей цвета сукна в сетке — виден ли стол сейчас. */
