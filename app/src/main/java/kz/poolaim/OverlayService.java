@@ -21,6 +21,7 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -34,12 +35,18 @@ import android.widget.Toast;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Держит все окна поверх игры: слой с линиями, кольца для ручного режима, панель; и автопоиск шаров. */
+/**
+ * Всё автоматически: по записи экрана находит стол (края, размер шара), затем каждые ~0.7 с — шары и биток,
+ * а слой AimView рисует удар для каждого шара. Вручную ничего ставить не нужно.
+ */
 public class OverlayService extends Service
-        implements AimView.Host, MarkerView.Host, PowerBar.Listener, SharedPreferences.OnSharedPreferenceChangeListener {
+        implements AimView.Host, PowerBar.Listener, SharedPreferences.OnSharedPreferenceChangeListener {
 
     static volatile boolean running;
-    static final float RA = 7f; // радиус шара в пикселях сетки анализа
+    static final float RA = 7f;       // радиус шара в пикселях сетки анализа шаров
+    static final int TABLE_STEP = 4;  // шаг сетки поиска стола, пикселей экрана
+
+    private static final String NEED_CAPTURE = "Нажми 🎯 и разреши запись экрана («Весь экран»)";
 
     private WindowManager wm;
     private SharedPreferences prefs;
@@ -49,22 +56,21 @@ public class OverlayService extends Service
     private AimView aim;
     private WindowManager.LayoutParams aimLp;
     private boolean aimAdded;
-    private MarkerView cue, tgt;
     private LinearLayout panel;
     private WindowManager.LayoutParams panelLp;
-    private TextView bAuto, bFilter, bBank, bCal, bEye;
+    private TextView bFilter, bBank, bCal, bEye;
     private PowerBar powerBar;
 
     private final int[] aimLoc = new int[2];
     private String curKey;
     private boolean calib, hidden;
 
-    // Автопоиск.
+    // Запись экрана и анализ.
     private MediaProjection projection;
     private ScreenGrabber grabber;
     private HandlerThread detectThread;
     private Handler detectHandler;
-    private boolean autoOn, scanning;
+    private boolean scanning;
     private long lastFrame = -1;
     private boolean forceScan;
     private Bitmap maskBmp;
@@ -72,11 +78,22 @@ public class OverlayService extends Service
     private final Paint maskPaint = new Paint();
     private float prevCueX = -1, prevCueY = -1;
 
+    // Стол.
+    private boolean calReady, manualCal;
+    private int feltCb = -1, feltCr = -1;
+    private float[] cand;
+    private int candHits;
+    private long lastTableScan;
+
     private final Runnable scanTick = new Runnable() {
         @Override
         public void run() {
-            if (!autoOn) return;
-            if (!calib && grabber != null && !scanning && aim.r > 0 && aim.R - aim.L > 10) startScan();
+            if (grabber == null) return;
+            if (!calib && !scanning) {
+                long now = SystemClock.uptimeMillis();
+                if (!calReady || (!manualCal && now - lastTableScan > 15000)) startTableScan();
+                else startScan();
+            }
             main.postDelayed(this, 700);
         }
     };
@@ -104,15 +121,12 @@ public class OverlayService extends Service
         try {
             aim = new AimView(this, this);
             aim.dmaxTables = prefs.getFloat("dmax", 6f);
-            aimLp = lp(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, false, false);
+            aimLp = lp(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT, false);
             // Android 12+: касания проходят сквозь чужое окно, только если его прозрачность <= 0.8.
             aimLp.alpha = 0.8f;
             wm.addView(aim, aimLp);
             aimAdded = true;
-
-            cue = new MarkerView(this, wm, lp(1, 1, true, true), 0xFFFFFFFF, this);
-            tgt = new MarkerView(this, wm, lp(1, 1, true, true), 0xFFFFD600, this);
-
+            aim.setStatus(NEED_CAPTURE);
             buildPanel();
         } catch (Exception e) {
             stopSelf();
@@ -134,8 +148,6 @@ public class OverlayService extends Service
         main.removeCallbacks(scanTick);
         stopProjection();
         if (prefs != null) prefs.unregisterOnSharedPreferenceChangeListener(this);
-        if (cue != null) remove(cue);
-        if (tgt != null) remove(tgt);
         if (aimAdded) {
             try {
                 wm.removeView(aim);
@@ -173,16 +185,14 @@ public class OverlayService extends Service
                 startForeground(1, n);
             }
         } catch (Throwable ignored) {
-            // Без уведомления тоже работает, просто система может выгрузить раньше.
         }
     }
 
-    private WindowManager.LayoutParams lp(int w, int h, boolean touchable, boolean noLimits) {
+    private WindowManager.LayoutParams lp(int w, int h, boolean touchable) {
         int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
         if (!touchable) flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-        if (noLimits) flags |= WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
         WindowManager.LayoutParams p = new WindowManager.LayoutParams(w, h,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT);
         p.gravity = Gravity.TOP | Gravity.LEFT;
@@ -196,7 +206,7 @@ public class OverlayService extends Service
         Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
     }
 
-    // ---------------------------------------------------------------- захват экрана
+    // ---------------------------------------------------------------- запись экрана
 
     private void startProjection(int code, Intent data) {
         stopProjection();
@@ -212,10 +222,13 @@ public class OverlayService extends Service
                 }
             }, main);
             DisplayMetrics dm = realMetrics();
-            grabber = new ScreenGrabber(projection, detectHandler, dm.densityDpi);
+            grabber = new ScreenGrabber(mp, detectHandler, dm.densityDpi);
             grabber.start(dm.widthPixels, dm.heightPixels);
-            setAuto(true);
-            toast("Автоприцел включён");
+            aim.setStatus(calReady ? "Ищу шары…" : "Ищу стол…");
+            lastTableScan = 0;
+            forceScan = true;
+            main.removeCallbacks(scanTick);
+            main.post(scanTick);
         } catch (Throwable t) {
             grabber = null;
             MediaProjection p0 = projection;
@@ -226,8 +239,8 @@ public class OverlayService extends Service
                 } catch (Exception ignored) {
                 }
             }
-            setAuto(false);
-            toast("Автоприцел недоступен — ручной режим");
+            aim.setStatus("Запись экрана не включилась (" + t.getClass().getSimpleName() + ") — нажми 🎯");
+            toast("Не удалось включить запись экрана: " + t.getClass().getSimpleName());
         }
     }
 
@@ -248,7 +261,9 @@ public class OverlayService extends Service
     private void onProjectionStopped(MediaProjection which) {
         if (which != projection || !running) return;
         stopProjection();
-        setAuto(false);
+        main.removeCallbacks(scanTick);
+        aim.setDetected(new ArrayList<>(), -1);
+        aim.setStatus("Запись экрана остановлена — нажми 🎯");
     }
 
     private void requestCapture() {
@@ -262,36 +277,114 @@ public class OverlayService extends Service
         }
     }
 
-    private void setAuto(boolean on) {
-        boolean was = autoOn;
-        autoOn = on && grabber != null;
-        if (was && !autoOn) {
-            // В ручной режим — ставим кольца туда, где были найденный биток и цель.
-            float[] ct = aim.currentCueAndTarget();
-            aim.setAuto(false);
-            aim.setBalls(ct[0], ct[1], ct[2], ct[3]);
-        } else {
-            aim.setAuto(autoOn);
+    /** 🎯: заново найти стол и шары (или попросить запись экрана). */
+    private void restartAuto() {
+        if (grabber == null) {
+            requestCapture();
+            return;
         }
-        main.removeCallbacks(scanTick);
-        if (autoOn) {
-            remove(cue);
-            remove(tgt);
-            forceScan = true;
-            main.post(scanTick);
-        } else if (!calib && !hidden) {
-            showMarkers();
-        }
-        if (bAuto != null) bAuto.setTextColor(autoOn ? 0xFF69F0AE : 0xFFFFFFFF);
+        manualCal = false;
+        calReady = false;
+        cand = null;
+        if (curKey != null) prefs.edit().remove("c3_" + curKey + "_manual").apply();
+        aim.clearTable();
+        aim.setStatus("Ищу стол и шары…");
+        lastTableScan = 0;
+        forceScan = true;
+        toast("Ищу стол и шары заново");
     }
+
+    // ---------------------------------------------------------------- поиск стола
+
+    private void startTableScan() {
+        final ScreenGrabber g = grabber;
+        if (g == null) return;
+        scanning = true;
+        lastTableScan = SystemClock.uptimeMillis();
+        final int offX = aimLoc[0], offY = aimLoc[1];
+        detectHandler.post(() -> {
+            TableFinder.Table t = null;
+            try {
+                if (g.grab()) {
+                    int gw = g.realW() / TABLE_STEP, gh = g.realH() / TABLE_STEP;
+                    int[] rgb = new int[gw * gh];
+                    for (int j = 0; j < gh; j++)
+                        for (int i = 0; i < gw; i++)
+                            rgb[j * gw + i] = g.pixelAtScreen((i + 0.5f) * TABLE_STEP, (j + 0.5f) * TABLE_STEP);
+                    t = TableFinder.find(rgb, gw, gh);
+                }
+            } catch (Throwable ignored) {
+                t = null;
+            }
+            final TableFinder.Table ft = t;
+            main.post(() -> onTableFound(ft, offX, offY));
+        });
+    }
+
+    private static boolean similar(float[] a, float[] b, float tol) {
+        float w = Math.max(1f, a[2] - a[0]);
+        for (int i = 0; i < 4; i++) if (Math.abs(a[i] - b[i]) > tol * w) return false;
+        return true;
+    }
+
+    private void onTableFound(TableFinder.Table t, int offX, int offY) {
+        scanning = false;
+        if (grabber == null) return;
+        if (t == null) {
+            cand = null;
+            if (!calReady) aim.setStatus("Ищу стол… (открой игру — стол должен быть виден)");
+            return;
+        }
+        float[] nt = {t.L * TABLE_STEP - offX, t.T * TABLE_STEP - offY,
+                t.R * TABLE_STEP - offX, t.B * TABLE_STEP - offY, t.r * TABLE_STEP};
+        if (calReady && similar(new float[]{aim.L, aim.T, aim.R, aim.B, aim.r}, nt, 0.02f)) {
+            cand = null; // стол на месте
+            if (feltCb < 0) {
+                feltCb = t.feltCb;
+                feltCr = t.feltCr;
+                saveCal(manualCal);
+            }
+            return;
+        }
+        if (cand != null && similar(cand, nt, 0.015f)) candHits++;
+        else {
+            cand = nt;
+            candHits = 1;
+        }
+        if (candHits < 2) {
+            if (!calReady) aim.setStatus("Нашёл стол, проверяю…");
+            forceScan = true;
+            lastTableScan = 0; // сразу ещё раз для подтверждения
+            return;
+        }
+        float[] cur = {aim.L, aim.T, aim.R, aim.B, aim.r};
+        if (!calReady || !similar(cur, nt, 0.02f)) {
+            float[] avg = new float[5];
+            for (int i = 0; i < 5; i++) avg[i] = (cand[i] + nt[i]) / 2f;
+            aim.setTable(avg[0], avg[1], avg[2], avg[3], avg[4]);
+            feltCb = t.feltCb;
+            feltCr = t.feltCr;
+            calReady = true;
+            manualCal = false;
+            saveCal(false);
+            prevMask = null;
+            prevCueX = -1;
+            aim.setStatus("Стол найден — ищу шары…");
+        }
+        cand = null;
+        forceScan = true;
+    }
+
+    // ---------------------------------------------------------------- поиск шаров
 
     /** Главный поток: снимаем маску наших же рисунков и отправляем задачу в поток анализа. */
     private void startScan() {
         final float L = aim.L, T = aim.T, r = aim.r;
+        if (r <= 0) return;
         final float s = RA / r;
         final int w = (int) Math.ceil((aim.R - L) * s), h = (int) Math.ceil((aim.B - T) * s);
         if (w < 20 || h < 10 || (long) w * h > 600_000) return;
-        int n = w * h;
+        final int n = w * h;
 
         if (maskBmp == null || maskBmp.getWidth() != w || maskBmp.getHeight() != h) {
             maskBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
@@ -318,8 +411,7 @@ public class OverlayService extends Service
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
                 int i = y * w + x;
-                boolean v = cur[i] || (prevMask != null && prevMask[i]);
-                if (!v) continue;
+                if (!(cur[i] || (prevMask != null && prevMask[i]))) continue;
                 for (int dy = -1; dy <= 1; dy++) {
                     int yy = y + dy;
                     if (yy < 0 || yy >= h) continue;
@@ -335,6 +427,7 @@ public class OverlayService extends Service
         final int offX = aimLoc[0], offY = aimLoc[1];
         final float[] pk = Geo.pockets(L, T, aim.R, aim.B);
         final float pcx = prevCueX, pcy = prevCueY;
+        final int fCb = feltCb, fCr = feltCr;
         final ScreenGrabber g = grabber;
         final boolean force = forceScan;
         forceScan = false;
@@ -342,6 +435,7 @@ public class OverlayService extends Service
         detectHandler.post(() -> {
             List<Detector.Blob> res = null;
             int cueIdx = -1;
+            boolean noTable = false;
             try {
                 if (g.grab() && (force || g.frameCount() != lastFrame)) {
                     lastFrame = g.frameCount();
@@ -352,32 +446,44 @@ public class OverlayService extends Service
                             rgb[j * w + i] = g.pixelAtScreen(L + (i + 0.5f) / s + offX, sy);
                         }
                     }
-                    List<Detector.Blob> found = Detector.detect(rgb, w, h, unk, RA);
-                    res = new ArrayList<>();
-                    for (Detector.Blob b : found) {
-                        b.x = L + (b.x + 0.5f) / s;
-                        b.y = T + (b.y + 0.5f) / s;
-                        boolean inPocket = false;
-                        for (int q = 0; q < 6; q++) {
-                            float lim = (q == 1 || q == 4) ? 2.0f * r : 2.5f * r;
-                            if (Math.hypot(b.x - pk[2 * q], b.y - pk[2 * q + 1]) < lim) inPocket = true;
+                    if (fCb >= 0 && TableFinder.feltFraction(rgb, n, fCb, fCr) < 0.35f) {
+                        noTable = true;
+                    } else {
+                        List<Detector.Blob> found = Detector.detect(rgb, w, h, unk, RA);
+                        res = new ArrayList<>();
+                        for (Detector.Blob b : found) {
+                            b.x = L + (b.x + 0.5f) / s;
+                            b.y = T + (b.y + 0.5f) / s;
+                            boolean inPocket = false;
+                            for (int q = 0; q < 6; q++) {
+                                float lim = (q == 1 || q == 4) ? 2.0f * r : 2.5f * r;
+                                if (Math.hypot(b.x - pk[2 * q], b.y - pk[2 * q + 1]) < lim) inPocket = true;
+                            }
+                            if (!inPocket) res.add(b);
                         }
-                        if (!inPocket) res.add(b);
+                        cueIdx = Detector.classify(res, pcx, pcy, 4f * r);
                     }
-                    cueIdx = Detector.classify(res, pcx, pcy, 4f * r);
                 }
             } catch (Throwable ignored) {
                 res = null;
             }
             final List<Detector.Blob> fr = res;
             final int fc = cueIdx;
-            main.post(() -> onDetected(fr, fc));
+            final boolean fn = noTable;
+            main.post(() -> onDetected(fr, fc, fn));
         });
     }
 
-    private void onDetected(List<Detector.Blob> found, int cueIdx) {
+    private void onDetected(List<Detector.Blob> found, int cueIdx, boolean noTable) {
         scanning = false;
-        if (found == null || !autoOn || calib) return;
+        if (grabber == null || calib) return;
+        if (noTable) {
+            aim.setDetected(new ArrayList<>(), -1);
+            aim.setStatus("Стол не виден");
+            lastTableScan = 0; // проверим, не сменился ли стол
+            return;
+        }
+        if (found == null) return;
         // Сглаживание: если шар сдвинулся совсем чуть-чуть — оставляем прежнюю точку, чтобы линии не дрожали.
         List<Geo.Ball> old = aim.getBalls();
         List<Geo.Ball> list = new ArrayList<>();
@@ -398,130 +504,61 @@ public class OverlayService extends Service
             prevCueY = list.get(cueIdx).y;
         }
         aim.setDetected(list, cueIdx);
+        int others = list.size() - (cueIdx >= 0 ? 1 : 0);
+        if (cueIdx < 0) aim.setStatus("Биток не найден · шаров: " + others);
+        else aim.setStatus("🎯 авто · шаров: " + others);
     }
 
-    // ---------------------------------------------------------------- стол и маркеры
+    // ---------------------------------------------------------------- стол: хранение
 
     @Override
     public void onAimLayout(int w, int h) {
         if (w <= 0 || h <= 0) return;
         aim.getLocationOnScreen(aimLoc);
-        String key = w > h ? "land" : "port";
         if (grabber != null) {
             DisplayMetrics dm = realMetrics();
             grabber.resize(dm.widthPixels, dm.heightPixels);
             forceScan = true;
         }
-        if (!key.equals(curKey)) {
-            curKey = key;
-            loadCal(w, h);
-            prevCueX = -1;
-            prevCueY = -1;
-            float tw = aim.R - aim.L, th = aim.B - aim.T;
-            setMarkers(aim.L + 0.25f * tw, (aim.T + aim.B) / 2f, aim.L + 0.62f * tw, aim.T + 0.35f * th);
+        String key = w > h ? "land" : "port";
+        if (key.equals(curKey)) return;
+        curKey = key;
+        cand = null;
+        prevCueX = -1;
+        prevCueY = -1;
+        lastTableScan = 0;
+        String k = "c3_" + key + "_";
+        if (prefs.contains(k + "L")) {
+            aim.setTable(prefs.getFloat(k + "L", 0), prefs.getFloat(k + "T", 0),
+                    prefs.getFloat(k + "R", 100), prefs.getFloat(k + "B", 50), prefs.getFloat(k + "r", 10));
+            feltCb = prefs.getInt(k + "cb", -1);
+            feltCr = prefs.getInt(k + "cr", -1);
+            manualCal = prefs.getBoolean(k + "manual", false);
+            calReady = true;
         } else {
-            syncMarkers();
+            aim.clearTable();
+            calReady = false;
+            manualCal = false;
         }
     }
 
-    private void loadCal(int w, int h) {
-        String k = curKey;
-        float L = prefs.getFloat(k + "L", -1f);
-        float T, R, B, r;
-        if (L < 0) {
-            float tw = w * 0.66f, th = tw / 2f;
-            if (th > h * 0.7f) {
-                th = h * 0.7f;
-                tw = th * 2f;
-            }
-            L = (w - tw) / 2f;
-            T = (h - th) / 2f + h * 0.05f;
-            R = L + tw;
-            B = T + th;
-            r = tw / 58f;
-        } else {
-            T = prefs.getFloat(k + "T", 0);
-            R = prefs.getFloat(k + "R", 100);
-            B = prefs.getFloat(k + "B", 50);
-            r = prefs.getFloat(k + "r", 10);
-        }
-        aim.setTable(L, T, R, B, r);
-    }
-
-    private void saveCal() {
+    private void saveCal(boolean manual) {
         if (curKey == null) return;
+        String k = "c3_" + curKey + "_";
         prefs.edit()
-                .putFloat(curKey + "L", aim.L)
-                .putFloat(curKey + "T", aim.T)
-                .putFloat(curKey + "R", aim.R)
-                .putFloat(curKey + "B", aim.B)
-                .putFloat(curKey + "r", aim.r)
+                .putFloat(k + "L", aim.L)
+                .putFloat(k + "T", aim.T)
+                .putFloat(k + "R", aim.R)
+                .putFloat(k + "B", aim.B)
+                .putFloat(k + "r", aim.r)
+                .putInt(k + "cb", feltCb)
+                .putInt(k + "cr", feltCr)
+                .putBoolean(k + "manual", manual)
                 .apply();
-    }
-
-    private void setMarkers(float ccx, float ccy, float tcx, float tcy) {
-        cue.setBallRadius(aim.r);
-        tgt.setBallRadius(aim.r);
-        aim.setBalls(ccx, ccy, tcx, tcy);
-        if (!calib && !hidden && !autoOn) {
-            place(cue, ccx, ccy);
-            place(tgt, tcx, tcy);
-        }
-    }
-
-    private void showMarkers() {
-        cue.setBallRadius(aim.r);
-        tgt.setBallRadius(aim.r);
-        place(cue, aim.cx, aim.cy);
-        place(tgt, aim.ox, aim.oy);
-    }
-
-    /** Ставит кольцо так, чтобы его центр был в точке (x,y) слоя с линиями. */
-    private void place(MarkerView m, float x, float y) {
-        m.lp.width = m.size;
-        m.lp.height = m.size;
-        m.lp.x = Math.round(x + aimLoc[0] - m.corrX - m.size / 2f);
-        m.lp.y = Math.round(y + aimLoc[1] - m.corrY - m.size / 2f);
-        try {
-            if (m.added) {
-                wm.updateViewLayout(m, m.lp);
-            } else {
-                wm.addView(m, m.lp);
-                m.added = true;
-            }
-        } catch (Exception ignored) {
-        }
-    }
-
-    private void remove(MarkerView m) {
-        if (!m.added) return;
-        try {
-            wm.removeView(m);
-        } catch (Exception ignored) {
-        }
-        m.added = false;
-    }
-
-    private void syncMarkers() {
-        if (cue == null || tgt == null || !cue.added || !tgt.added) return;
-        aim.setBalls(cue.centerX() - aimLoc[0], cue.centerY() - aimLoc[1],
-                tgt.centerX() - aimLoc[0], tgt.centerY() - aimLoc[1]);
-    }
-
-    @Override
-    public void onMarkerMoved(MarkerView m) {
-        syncMarkers();
-    }
-
-    @Override
-    public void onMarkerTap(MarkerView m) {
-        if (m == tgt) aim.nextShot();
-        else aim.toggleCuePath();
     }
 
     @Override
     public void onCalibEdited() {
-        saveCal();
     }
 
     @Override
@@ -542,26 +579,26 @@ public class OverlayService extends Service
     // ---------------------------------------------------------------- режимы
 
     private void toggleCalib() {
+        if (!calib && !calReady) {
+            toast("Стол ещё не найден — подожди или нажми 🎯");
+            return;
+        }
         if (hidden) toggleHidden();
         calib = !calib;
         if (calib) {
-            remove(cue);
-            remove(tgt);
             aimLp.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         } else {
             aimLp.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-            saveCal();
+            manualCal = true;
+            saveCal(true);
+            prevMask = null;
+            forceScan = true;
         }
         try {
             wm.updateViewLayout(aim, aimLp);
         } catch (Exception ignored) {
         }
         aim.setCalib(calib);
-        if (!calib) {
-            prevMask = null;
-            forceScan = true;
-            if (!autoOn) showMarkers();
-        }
         bCal.setText(calib ? "✓" : "⚙");
         bCal.setTextColor(calib ? 0xFF69F0AE : 0xFFFFFFFF);
     }
@@ -570,12 +607,6 @@ public class OverlayService extends Service
         if (!hidden && calib) toggleCalib();
         hidden = !hidden;
         aim.setVisibility(hidden ? View.INVISIBLE : View.VISIBLE);
-        if (hidden) {
-            remove(cue);
-            remove(tgt);
-        } else if (!autoOn) {
-            showMarkers();
-        }
         bEye.setAlpha(hidden ? 0.4f : 1f);
     }
 
@@ -629,13 +660,7 @@ public class OverlayService extends Service
                 }
             }
         });
-        bAuto = btn(c1, "🎯", v -> {
-            if (grabber == null) requestCapture();
-            else {
-                setAuto(!autoOn);
-                toast(autoOn ? "Автоприцел включён" : "Ручной режим: двигай кольца сам");
-            }
-        });
+        btn(c1, "🎯", v -> restartAuto());
         btn(c1, "⟳", v -> aim.nextShot());
         bFilter = btn(c1, "В", v -> cycleFilter());
         bBank = btn(c2, "Б", v -> {
@@ -652,7 +677,7 @@ public class OverlayService extends Service
         powerBar.setLayoutParams(new LinearLayout.LayoutParams((int) (34 * dp), LinearLayout.LayoutParams.MATCH_PARENT));
         panel.addView(powerBar);
 
-        panelLp = lp(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true, false);
+        panelLp = lp(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, true);
         panelLp.x = prefs.getInt("panelX", (int) (8 * dp));
         panelLp.y = prefs.getInt("panelY", (int) (60 * dp));
         wm.addView(panel, panelLp);

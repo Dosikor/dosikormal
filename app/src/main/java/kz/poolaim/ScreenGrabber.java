@@ -91,6 +91,14 @@ final class ScreenGrabber {
         return has;
     }
 
+    synchronized int realW() {
+        return realW;
+    }
+
+    synchronized int realH() {
+        return realH;
+    }
+
     synchronized long frameCount() {
         return frames;
     }

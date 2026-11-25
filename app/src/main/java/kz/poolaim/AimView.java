@@ -11,7 +11,10 @@ import android.view.View;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Полноэкранный прозрачный слой: рисует линии, а в режиме настройки — рамку стола. */
+/**
+ * Полноэкранный прозрачный слой. Всё автоматически: стол и шары находит служба,
+ * а здесь для каждого шара рисуется его лучший удар, выбранный — подробно (сила, путь битка).
+ */
 public class AimView extends View {
 
     interface Host {
@@ -27,32 +30,26 @@ public class AimView extends View {
 
     // Стол (внутренние края бортов) и радиус шара, в пикселях этого окна.
     float L, T, R, B, r;
-    // Ручной режим: центры битка (c) и прицельного шара (o) с колец.
-    float cx, cy, ox, oy;
-    boolean ready;
+    boolean tableReady;
     boolean banks, calib, showCue = true;
-    // Пробный шар для настройки размера.
-    float sx, sy;
+    float sx, sy; // пробный шар в режиме ручной подстройки
 
-    // Авторежим: найденные шары.
-    boolean auto;
     private List<Geo.Ball> balls = new ArrayList<>();
     private int cueIdx = -1;
-    private boolean scannedOnce;
     int filter = Geo.FILTER_ALL;
+    private String status;
 
-    // Сила.
     float dmaxTables = 6f;
     boolean powerAuto = true;
     float powerManual = 0.5f;
 
-    private List<Geo.Shot> shots = new ArrayList<>();
+    private List<Geo.Shot> perBall = new ArrayList<>(); // лучший удар для каждого шара, от простого к сложному
     private int sel = 0;
-    private String selKey = null; // null — автоматически лучший удар
-    private float selTx, selTy;
+    private boolean selManual;
+    private float selX, selY;
 
-    private final Paint pTable, pPocket, pObj, pObjFaint, pAim, pGhost, pDot, pCue, pCueBad, pText, pHandle, pCal,
-            pAlt, pAltObj, pRing, pRingStripe, pCueRing, pBad, pStop, pHit;
+    private final Paint pTable, pPocket, pObj, pObjFaint, pAim, pGhost, pDot, pCue, pCueBad, pText, pSmall, pHandle,
+            pCal, pAlt, pAltGhost, pAltObj, pRing, pRingStripe, pCueRing, pBad, pNoShot, pStop, pHit;
     private final Path path = new Path();
 
     private int drag = -1;
@@ -62,8 +59,8 @@ public class AimView extends View {
         super(c);
         this.host = host;
         dp = c.getResources().getDisplayMetrics().density;
-        pTable = stroke(0x40FFFFFF, 1.2f);
-        pPocket = stroke(0x66FFFFFF, 1.2f);
+        pTable = stroke(0x33FFFFFF, 1.2f);
+        pPocket = stroke(0x55FFFFFF, 1.2f);
         pObj = stroke(0xFF00E676, 3f);
         pObjFaint = stroke(0x8800E676, 2f);
         pObjFaint.setPathEffect(new DashPathEffect(new float[]{3 * dp, 5 * dp}, 0));
@@ -81,15 +78,22 @@ public class AimView extends View {
         pText.setTextSize(14 * dp);
         pText.setFakeBoldText(true);
         pText.setShadowLayer(3 * dp, 0, 0, 0xFF000000);
+        pSmall = fill(0xFFFFFFFF);
+        pSmall.setTextSize(12 * dp);
+        pSmall.setFakeBoldText(true);
+        pSmall.setShadowLayer(3 * dp, 0, 0, 0xFF000000);
         pHandle = fill(0xCCFFC107);
         pCal = stroke(0xFFFFC107, 2f);
-        pAlt = stroke(0x77FFFFFF, 1.2f);
-        pAltObj = stroke(0x6600E676, 1.5f);
+        pAlt = stroke(0x66FFFFFF, 1.2f);
+        pAltGhost = stroke(0x99FFFFFF, 1.5f);
+        pAltObj = stroke(0x9900E676, 2f);
         pRing = stroke(0x99FFFFFF, 1.2f);
         pRingStripe = stroke(0x99FFFFFF, 1.2f);
         pRingStripe.setPathEffect(new DashPathEffect(new float[]{3 * dp, 3 * dp}, 0));
         pCueRing = stroke(0xFFFFFFFF, 2.4f);
         pBad = stroke(0xFFFF5252, 2.5f);
+        pNoShot = stroke(0x88FF5252, 1.2f);
+        pNoShot.setPathEffect(new DashPathEffect(new float[]{2 * dp, 3 * dp}, 0));
     }
 
     private Paint stroke(int color, float w) {
@@ -123,68 +127,42 @@ public class AimView extends View {
         r = rad;
         sx = (l + rr) / 2f;
         sy = (t + b) / 2f;
+        tableReady = rr - l > 10 && b - t > 10 && rad > 0;
         recompute();
     }
 
-    void setBalls(float ccx, float ccy, float tcx, float tcy) {
-        cx = ccx;
-        cy = ccy;
-        ox = tcx;
-        oy = tcy;
-        ready = true;
-        if (!auto) recompute();
-    }
-
-    void setAuto(boolean on) {
-        auto = on;
-        selKey = null;
-        if (!on) {
-            balls = new ArrayList<>();
-            cueIdx = -1;
-            scannedOnce = false;
-        }
+    void clearTable() {
+        tableReady = false;
+        balls = new ArrayList<>();
+        cueIdx = -1;
         recompute();
     }
 
     void setDetected(List<Geo.Ball> list, int cue) {
         balls = list;
         cueIdx = cue;
-        scannedOnce = true;
-        if (auto) recompute();
+        recompute();
     }
 
     List<Geo.Ball> getBalls() {
         return balls;
     }
 
-    int getCueIdx() {
-        return cueIdx;
-    }
-
-    /** {биток x,y, цель x,y} — для перехода в ручной режим. */
-    float[] currentCueAndTarget() {
-        if (auto && cueIdx >= 0) {
-            Geo.Ball c = balls.get(cueIdx);
-            float tx = c.x + 6 * r, ty = c.y;
-            if (!shots.isEmpty()) {
-                Geo.Shot s = shots.get(sel);
-                tx = s.ox;
-                ty = s.oy;
-            }
-            return new float[]{c.x, c.y, tx, ty};
-        }
-        return new float[]{cx, cy, ox, oy};
+    void setStatus(String s) {
+        if (s == null ? status == null : s.equals(status)) return;
+        status = s;
+        invalidate();
     }
 
     void setBanks(boolean on) {
         banks = on;
-        selKey = null;
+        selManual = false;
         recompute();
     }
 
     void setFilter(int f) {
         filter = f;
-        selKey = null;
+        selManual = false;
         recompute();
     }
 
@@ -212,57 +190,71 @@ public class AimView extends View {
     }
 
     void nextShot() {
-        if (shots.isEmpty()) return;
-        sel = (sel + 1) % shots.size();
-        if (sel == 0) {
-            selKey = null;
-        } else {
-            Geo.Shot s = shots.get(sel);
-            selKey = s.key();
-            selTx = s.ox;
-            selTy = s.oy;
-        }
+        if (perBall.isEmpty()) return;
+        sel = (sel + 1) % perBall.size();
+        selManual = sel != 0;
+        selX = perBall.get(sel).ox;
+        selY = perBall.get(sel).oy;
         notifyPower();
         invalidate();
     }
 
     void recompute() {
-        if (R - L < 10 || B - T < 10) {
-            shots = new ArrayList<>();
-        } else if (auto) {
-            shots = cueIdx >= 0
-                    ? Geo.computeAll(L, T, R, B, r, balls, cueIdx, filter, banks, dmax())
-                    : new ArrayList<>();
-        } else if (ready) {
-            shots = Geo.compute(L, T, R, B, r, cx, cy, ox, oy, banks, dmax(), null, -1);
-        } else {
-            shots = new ArrayList<>();
+        perBall = new ArrayList<>();
+        if (tableReady && cueIdx >= 0 && cueIdx < balls.size()) {
+            List<Geo.Shot> all = Geo.computeAll(L, T, R, B, r, balls, cueIdx, filter, banks, dmax());
+            boolean[] used = new boolean[balls.size()];
+            for (Geo.Shot s : all) {
+                if (s.obj < 0 || used[s.obj]) continue;
+                used[s.obj] = true;
+                perBall.add(s);
+            }
         }
         sel = 0;
-        if (selKey != null) {
+        if (selManual) {
             int idx = -1;
-            for (int i = 0; i < shots.size(); i++) {
-                Geo.Shot s = shots.get(i);
-                if (s.key().equals(selKey) && Math.hypot(s.ox - selTx, s.oy - selTy) < 1.5f * r) {
+            for (int i = 0; i < perBall.size(); i++) {
+                Geo.Shot s = perBall.get(i);
+                if (Math.hypot(s.ox - selX, s.oy - selY) < 1.5f * r) {
                     idx = i;
                     break;
                 }
             }
             if (idx >= 0) {
                 sel = idx;
-                selTx = shots.get(idx).ox;
-                selTy = shots.get(idx).oy;
+                selX = perBall.get(idx).ox;
+                selY = perBall.get(idx).oy;
             } else {
-                selKey = null;
+                selManual = false;
             }
         }
         notifyPower();
         invalidate();
     }
 
+    private boolean isBreak() {
+        return balls.size() - (cueIdx >= 0 ? 1 : 0) >= 12;
+    }
+
+    private int nearestTarget() {
+        if (cueIdx < 0) return -1;
+        Geo.Ball c = balls.get(cueIdx);
+        int best = -1;
+        double bd = Double.MAX_VALUE;
+        for (int i = 0; i < balls.size(); i++) {
+            if (i == cueIdx) continue;
+            double d = Math.hypot(balls.get(i).x - c.x, balls.get(i).y - c.y);
+            if (d < bd) {
+                bd = d;
+                best = i;
+            }
+        }
+        return best;
+    }
+
     private float power() {
-        if (shots.isEmpty()) return powerAuto ? 0f : powerManual;
-        return powerAuto ? shots.get(sel).recPower() : powerManual;
+        if (perBall.isEmpty()) return powerAuto ? (cueIdx >= 0 && isBreak() ? 1f : 0f) : powerManual;
+        return powerAuto ? perBall.get(sel).recPower() : powerManual;
     }
 
     private void notifyPower() {
@@ -270,7 +262,6 @@ public class AimView extends View {
     }
 
     private float[] obstaclesFor(Geo.Shot s) {
-        if (!auto) return null;
         int n = 0;
         float[] o = new float[2 * balls.size()];
         for (int i = 0; i < balls.size(); i++) {
@@ -296,71 +287,74 @@ public class AimView extends View {
 
     @Override
     protected void onDraw(Canvas c) {
-        if (R - L < 10) return;
-        if (calib) {
+        if (calib && tableReady) {
             drawCalib(c);
             return;
         }
+        if (status != null) {
+            pSmall.setColor(0xFFFFFFFF);
+            c.drawText(status, (getWidth() - pSmall.measureText(status)) / 2f, 18 * dp, pSmall);
+        }
+        if (!tableReady) return;
+
         c.drawRect(L, T, R, B, pTable);
         float[] pk = Geo.pockets(L, T, R, B);
         for (int i = 0; i < 6; i++) c.drawCircle(pk[2 * i], pk[2 * i + 1], r * 0.7f, pPocket);
 
-        float ax, ay; // где писать подписи
-        if (auto) {
-            for (int i = 0; i < balls.size(); i++) {
-                Geo.Ball b = balls.get(i);
-                if (i == cueIdx) {
-                    c.drawCircle(b.x, b.y, r + 2 * dp, pCueRing);
-                } else {
-                    boolean on = Geo.typeMatches(b.type, filter);
-                    Paint p = b.type == Geo.STRIPE ? pRingStripe : pRing;
-                    p.setAlpha(on ? 0x99 : 0x33);
-                    c.drawCircle(b.x, b.y, r + 1.5f * dp, p);
-                }
+        boolean[] hasShot = new boolean[balls.size()];
+        for (Geo.Shot s : perBall) if (s.obj >= 0 && s.obj < hasShot.length) hasShot[s.obj] = true;
+        for (int i = 0; i < balls.size(); i++) {
+            Geo.Ball b = balls.get(i);
+            if (i == cueIdx) {
+                c.drawCircle(b.x, b.y, r + 2 * dp, pCueRing);
+                continue;
             }
-            if (cueIdx < 0) {
-                pText.setColor(0xFFFFD740);
-                labelAt(c, scannedOnce ? (balls.isEmpty() ? "шары не найдены — проверь настройку ⚙" : "биток не найден")
-                        : "ищу шары…", (L + R) / 2f, T + 3 * r, null);
-                return;
+            boolean on = Geo.typeMatches(b.type, filter);
+            if (on && !hasShot[i] && cueIdx >= 0) {
+                c.drawCircle(b.x, b.y, r + 2 * dp, pNoShot);
+            } else {
+                Paint p = b.type == Geo.STRIPE ? pRingStripe : pRing;
+                p.setAlpha(on ? 0x99 : 0x33);
+                c.drawCircle(b.x, b.y, r + 1.5f * dp, p);
             }
-            ax = balls.get(cueIdx).x;
-            ay = balls.get(cueIdx).y;
-        } else {
-            if (!ready) return;
-            ax = ox;
-            ay = oy;
         }
+        if (cueIdx < 0) return;
 
-        if (shots.isEmpty()) {
-            pText.setColor(0xFFFF5252);
-            labelAt(c, banks ? "нет удара" : "нет удара — нажми Б (через борт)", ax, ay, null);
+        Geo.Ball cueBall = balls.get(cueIdx);
+        if (perBall.isEmpty()) {
+            // Чистого удара нет (например, разбой): показываем ближайший шар.
+            int near = nearestTarget();
+            if (near >= 0) {
+                Geo.Ball nb = balls.get(near);
+                c.drawLine(cueBall.x, cueBall.y, nb.x, nb.y, pHit);
+                c.drawCircle(nb.x, nb.y, r + 3 * dp, pHit);
+            }
+            pText.setColor(0xFFFFAB40);
+            String msg = isBreak() ? "РАЗБОЙ: бей в первый шар, сила 100%"
+                    : (banks ? "чистого удара нет — бей в ближний шар" : "чистого удара нет — нажми Б (через борт)");
+            labelAt(c, msg, cueBall.x, cueBall.y, null);
             return;
         }
-        Geo.Shot s = shots.get(sel);
-        float dmax = dmax();
-        float p = power();
 
-        // Другие варианты — бледно, чтобы видеть, куда ещё можно.
-        int shown = 0;
-        for (int i = 0; i < shots.size() && shown < 3; i++) {
+        // Линия для каждого шара: куда целиться и в какую лузу.
+        for (int i = 0; i < perBall.size(); i++) {
             if (i == sel) continue;
-            Geo.Shot a = shots.get(i);
-            if (a.obj == s.obj && a.obj >= 0) continue;
+            Geo.Shot a = perBall.get(i);
             c.drawLine(a.cx, a.cy, a.gx, a.gy, pAlt);
-            c.drawCircle(a.gx, a.gy, r, pAlt);
+            c.drawCircle(a.gx, a.gy, r, pAltGhost);
             path.reset();
             path.moveTo(a.ox, a.oy);
             if (a.cushion >= 0) path.lineTo(a.kx, a.ky);
             path.lineTo(a.px, a.py);
             c.drawPath(path, pAltObj);
-            shown++;
         }
 
+        Geo.Shot s = perBall.get(sel);
+        float dmax = dmax();
+        float p = power();
         Geo.Run obj = Geo.objectRun(s, p, dmax);
         Geo.Run cue = Geo.cueRun(s, p, dmax, L, T, R, B, r, obstaclesFor(s));
 
-        // Куда покатится прицельный шар (пунктир — куда не докатится).
         if (!obj.full) {
             path.reset();
             path.moveTo(s.ox, s.oy);
@@ -371,22 +365,18 @@ public class AimView extends View {
         drawPoly(c, obj.pts, pObj);
         c.drawCircle(s.px, s.py, r * 1.1f, obj.full ? pObj : pObjFaint);
         if (!obj.full && obj.pts.length >= 2) {
-            float ex = obj.pts[obj.pts.length - 2], ey = obj.pts[obj.pts.length - 1];
-            cross(c, ex, ey, r * 0.6f, pBad);
+            cross(c, obj.pts[obj.pts.length - 2], obj.pts[obj.pts.length - 1], r * 0.6f, pBad);
         }
 
-        // Линия прицела: от битка к «призрачному шару».
         if (cue.shortOfObject) {
             drawPoly(c, cue.pts, pBad);
-            float ex = cue.pts[cue.pts.length - 2], ey = cue.pts[cue.pts.length - 1];
-            cross(c, ex, ey, r * 0.6f, pBad);
+            cross(c, cue.pts[cue.pts.length - 2], cue.pts[cue.pts.length - 1], r * 0.6f, pBad);
         } else {
             c.drawLine(s.cx, s.cy, s.gx, s.gy, pAim);
         }
         c.drawCircle(s.gx, s.gy, r, pGhost);
         c.drawCircle(s.gx, s.gy, 1.8f * dp, pDot);
 
-        // Куда уйдёт биток после удара и где остановится.
         if (showCue && !cue.shortOfObject && cue.pts.length >= 4) {
             drawPoly(c, cue.pts, cue.scratch ? pCueBad : pCue);
             float ex = cue.pts[cue.pts.length - 2], ey = cue.pts[cue.pts.length - 1];
@@ -398,10 +388,10 @@ public class AimView extends View {
         String warn = null;
         if (cue.shortOfObject) warn = "слабо: биток не доедет";
         else if (!obj.full) warn = "слабо: шар не докатится (нужно ≥ " + pct(s.pmin) + ")";
-        else if (cue.scratch && showCue) warn = "⚠ биток упадёт в лузу — смени силу/вариант";
+        else if (cue.scratch && showCue) warn = "⚠ биток упадёт в лузу — ⟳ другой шар или сила";
         pText.setColor(col);
         labelAt(c, Math.round(s.cut) + "°" + (s.cushion >= 0 ? " борт" : "")
-                + "   сила " + pct(p) + "   " + (sel + 1) + "/" + shots.size(), s.ox, s.oy, warn);
+                + "   сила " + pct(p) + "   " + (sel + 1) + "/" + perBall.size(), s.ox, s.oy, warn);
     }
 
     private static String pct(float p) {
@@ -428,7 +418,7 @@ public class AimView extends View {
         if (x + w > getWidth() - 4 * dp) x = bx - 1.6f * r - w;
         if (x < 4 * dp) x = 4 * dp;
         float y = by - 1.6f * r - (warn != null ? 18 * dp : 0);
-        if (y < 20 * dp) y = by + 1.6f * r + 14 * dp;
+        if (y < 36 * dp) y = by + 1.6f * r + 14 * dp;
         c.drawText(t, x, y, pText);
         if (warn != null) {
             pText.setColor(0xFFFF5252);
@@ -456,10 +446,9 @@ public class AimView extends View {
 
         pText.setColor(0xFFFFFFFF);
         String[] lines = {
-                "НАСТРОЙКА",
-                "1) Жёлтые углы рамки — на края зелёного сукна (бортики)",
-                "2) Белый круг — наложи на любой шар, жёлтой ручкой ● подгони размер",
-                "3) Нажми ✓ на панели — готово"
+                "ПОДСТРОЙКА (нужна, только если стол найден неточно)",
+                "Жёлтые углы рамки — на края сукна. Белый круг — на шар, ручкой ● — размер.",
+                "Готово — ✓.  Вернуть автонастройку — 🎯"
         };
         float y = 28 * dp;
         for (String line : lines) {
@@ -468,7 +457,7 @@ public class AimView extends View {
         }
     }
 
-    // ---------------------------------------------------------------- настройка пальцем
+    // ---------------------------------------------------------------- ручная подстройка пальцем
 
     @Override
     public boolean onTouchEvent(MotionEvent e) {
