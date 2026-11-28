@@ -19,6 +19,7 @@ final class Sim {
         int[] pocketOf;       // в какую лузу (0..5) или -1
         float[] fx, fy;       // где остановится
         int firstHit = -1;    // какой шар биток заденет первым
+        int cueHitLen = -1;   // сколько чисел в пути битка до первого касания (включая точку касания)
         boolean cuePotted;
     }
 
@@ -158,7 +159,10 @@ final class Sim {
                     paths[ei].add(x[ei], y[ei]);
                     paths[ej].add(x[ej], y[ej]);
                     moved[ei] = moved[ej] = true;
-                    if (res.firstHit < 0 && (ei == cue || ej == cue)) res.firstHit = ei == cue ? ej : ei;
+                    if (res.firstHit < 0 && (ei == cue || ej == cue)) {
+                        res.firstHit = ei == cue ? ej : ei;
+                        res.cueHitLen = paths[cue].n;
+                    }
                 } else {
                     int i = ei;
                     paths[i].add(x[i], y[i]);
@@ -184,10 +188,13 @@ final class Sim {
                         y[i] = pk[2 * pocket + 1];
                         if (i == cue) res.cuePotted = true;
                     } else if (kind == 2) {
+                        // Угол падения = углу отражения, скорость теряется целиком (как в расчёте ударов через борт).
                         vx[i] = -vx[i] * CUSH_E;
+                        vy[i] = vy[i] * CUSH_E;
                         x[i] = Math.max(xl, Math.min(xr, x[i]));
                     } else {
                         vy[i] = -vy[i] * CUSH_E;
+                        vx[i] = vx[i] * CUSH_E;
                         y[i] = Math.max(yt, Math.min(yb, y[i]));
                     }
                 }

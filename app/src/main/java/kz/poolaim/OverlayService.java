@@ -97,7 +97,7 @@ public class OverlayService extends Service
 
     // Стол.
     private boolean calReady, manualCal;
-    private int feltCb = -1, feltCr = -1;
+    private int feltCb = -1, feltCr = -1, feltY = -1;
     private float[] cand;
     private int candHits;
     private long lastTableScan;
@@ -362,9 +362,10 @@ public class OverlayService extends Service
                 t.R * TABLE_STEP - offX, t.B * TABLE_STEP - offY, t.r * TABLE_STEP};
         if (calReady && similar(new float[]{aim.L, aim.T, aim.R, aim.B, aim.r}, nt, 0.02f)) {
             cand = null; // стол на месте
-            if (feltCb < 0) {
+            if (feltCb < 0 || feltY < 0) {
                 feltCb = t.feltCb;
                 feltCr = t.feltCr;
+                feltY = t.feltY;
                 saveCal(manualCal);
             }
             return;
@@ -389,6 +390,7 @@ public class OverlayService extends Service
             tracker.clear();
             feltCb = t.feltCb;
             feltCr = t.feltCr;
+            feltY = t.feltY;
             calReady = true;
             manualCal = false;
             saveCal(false);
@@ -520,7 +522,7 @@ public class OverlayService extends Service
         final int offX = aimLoc[0], offY = aimLoc[1];
         final float[] pk = Geo.pockets(L, T, aim.R, aim.B);
         final float pcx = prevCueX, pcy = prevCueY;
-        final int fCb = feltCb, fCr = feltCr;
+        final int fCb = feltCb, fCr = feltCr, fY = feltY;
         final ScreenGrabber g = grabber;
         final boolean force = forceScan;
         forceScan = false;
@@ -539,7 +541,7 @@ public class OverlayService extends Service
                             rgb[j * w + i] = g.pixelAtScreen(L + (i + 0.5f) / s + offX, sy);
                         }
                     }
-                    if (fCb >= 0 && TableFinder.feltFraction(rgb, n, fCb, fCr) < 0.35f) {
+                    if (fCb >= 0 && fY >= 0 && TableFinder.feltFraction(rgb, n, fCb, fCr, fY) < 0.35f) {
                         noTable = true;
                     } else {
                         List<Detector.Blob> found = Detector.detect(rgb, w, h, unk, RA);
@@ -626,6 +628,7 @@ public class OverlayService extends Service
                     prefs.getFloat(k + "R", 100), prefs.getFloat(k + "B", 50), prefs.getFloat(k + "r", 10));
             feltCb = prefs.getInt(k + "cb", -1);
             feltCr = prefs.getInt(k + "cr", -1);
+            feltY = prefs.getInt(k + "fy", -1);
             manualCal = prefs.getBoolean(k + "manual", false);
             calReady = true;
         } else {
@@ -646,6 +649,7 @@ public class OverlayService extends Service
                 .putFloat(k + "r", aim.r)
                 .putInt(k + "cb", feltCb)
                 .putInt(k + "cr", feltCr)
+                .putInt(k + "fy", feltY)
                 .putBoolean(k + "manual", manual)
                 .apply();
     }
@@ -760,12 +764,13 @@ public class OverlayService extends Service
         btn(c1, "🎯", v -> restartAuto());
         btn(c1, "⟳", v -> aim.nextShot());
         bFilter = btn(c1, "В", v -> cycleFilter());
-        bSugg = btn(c2, "💡", v -> {
-            aim.setShowSugg(!aim.showSugg);
-            bSugg.setAlpha(aim.showSugg ? 1f : 0.45f);
-            toast(aim.showSugg ? "Подсказки к каждому шару: вкл" : "Подсказки выкл — только прицел игры с физикой");
+        bSugg = btn(c2, "1", v -> {
+            int m = (aim.mode + 1) % 3;
+            aim.setMode(m);
+            bSugg.setText(m == AimView.MODE_ONE ? "1" : m == AimView.MODE_PHYSICS ? "∞" : "💡");
+            toast(m == AimView.MODE_ONE ? "Одна линия от кия"
+                    : m == AimView.MODE_PHYSICS ? "Физика всех шаров (как в видео)" : "Подсказки ко всем шарам");
         });
-        bSugg.setAlpha(0.45f);
         bBank = btn(c2, "Б", v -> {
             aim.setBanks(!aim.banks);
             bBank.setTextColor(aim.banks ? 0xFF69F0AE : 0xFFFFFFFF);

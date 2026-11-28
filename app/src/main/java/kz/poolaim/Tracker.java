@@ -159,8 +159,9 @@ final class Tracker {
         for (Track t : tracks) if (t.cueStreak > 0 && (best == null || t.cueStreak > best.cueStreak)) best = t;
         if (cue == null) {
             cue = best;
-        } else if (best != null && best != cue && cue.notCueStreak >= 4 && best.cueStreak >= 3) {
-            cue = best;
+        } else if (best != null && best != cue
+                && ((cue.notCueStreak >= 4 && best.cueStreak >= 3) || (cue.misses >= 2 && best.cueStreak >= 1))) {
+            cue = best; // старого битка уже не видно, а новый белый шар — биток (его переставили)
         }
     }
 

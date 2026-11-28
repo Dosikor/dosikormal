@@ -262,17 +262,18 @@ final class TableFinder {
         return ratio > 0.5f * fRatio && ratio < 2f * fRatio;
     }
 
-    /** Доля пикселей цвета сукна в сетке — виден ли стол сейчас. */
-    static float feltFraction(int[] rgb, int n, int fCb, int fCr) {
-        int c = 0, step = Math.max(1, n / 4000);
-        int tot = 0;
+    /** Доля пикселей цвета сукна в сетке — виден ли стол сейчас (по оттенку, как при поиске стола). */
+    static float feltFraction(int[] rgb, int n, int fCb, int fCr, int fY) {
+        double fHue = Math.atan2(fCr - 128, fCb - 128);
+        float fRatio = (float) Math.hypot(fCr - 128, fCb - 128) / Math.max(10, fY);
+        int c = 0, tot = 0, step = Math.max(1, n / 4000);
         for (int i = 0; i < n; i += step) {
             int v = rgb[i];
             int r = (v >> 16) & 255, g = (v >> 8) & 255, b = v & 255;
-            int cb = (-169 * r - 331 * g + 500 * b) / 1000 + 128;
-            int cr = (500 * r - 419 * g - 81 * b) / 1000 + 128;
-            int db = cb - fCb, dr = cr - fCr;
-            if (db * db + dr * dr < 18 * 18) c++;
+            int y = (299 * r + 587 * g + 114 * b) / 1000;
+            int cb = clamp8((-169 * r - 331 * g + 500 * b) / 1000 + 128);
+            int cr = clamp8((500 * r - 419 * g - 81 * b) / 1000 + 128);
+            if (feltLike(y, cb, cr, fHue, fRatio, fY)) c++;
             tot++;
         }
         return tot > 0 ? (float) c / tot : 0f;

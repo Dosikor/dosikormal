@@ -33,7 +33,10 @@ public class AimView extends View {
     float L, T, R, B, r;
     boolean tableReady;
     boolean banks = true, calib, showCue = true;
-    boolean showSugg = false; // подсказки «линия к каждому шару» (по умолчанию — чистый экран, как в видео)
+    // Режимы: одна линия от кия (по умолчанию) / физика всех шаров (как в видео) / подсказки ко всем шарам.
+    static final int MODE_ONE = 0, MODE_PHYSICS = 1, MODE_HINTS = 2;
+    int mode = MODE_ONE;
+    boolean showSugg = false;
     float sx, sy; // пробный шар в режиме ручной подстройки
 
     private List<Geo.Ball> balls = new ArrayList<>();
@@ -67,7 +70,8 @@ public class AimView extends View {
 
     private final Paint pTable, pPocket, pObj, pObjFaint, pAim, pGhost, pDot, pCue, pCueBad, pText, pSmall, pHandle,
             pCal, pAlt, pAltGhost, pAltObj, pRing, pRingStripe, pCueRing, pBad, pNoShot, pStop, pHit,
-            pBounce, pPredCue, pPredObj, pPredAfter, pPredGhost, pSim, pSimDot, pSimDotEdge, pSimRing;
+            pBounce, pPredCue, pPredObj, pPredAfter, pPredGhost, pSim, pSimDot, pSimDotEdge, pSimRing,
+            pOne, pOneObj, pOneGhost, pRail, pCueThin;
     private final Path path = new Path();
 
     private int drag = -1;
@@ -113,6 +117,12 @@ public class AimView extends View {
         pSimDot = fill(0xFFFFFFFF);
         pSimDotEdge = stroke(0xCC000000, 1.2f);
         pSimRing = stroke(0xFFFFFFFF, 3f);
+        // Одна линия от кия: жёлтая (не белая — чтобы не путать с линией самой игры).
+        pOne = stroke(0xFFFFEB3B, 2.6f);
+        pOneObj = stroke(0xFF00E676, 3f);
+        pOneGhost = stroke(0xFFFFF59D, 2f);
+        pRail = stroke(0xCCFFEB3B, 1.3f);
+        pCueThin = stroke(0x99FFFFFF, 1.4f);
         pAltGhost = stroke(0x99FFF59D, 1.5f);
         pAltObj = stroke(0x9900E676, 2f);
         pRing = stroke(0x99FFFFFF, 1.2f);
@@ -273,6 +283,11 @@ public class AimView extends View {
                 L, T, R, B, r, dmax());
     }
 
+    void setMode(int m) {
+        mode = m;
+        setShowSugg(m == MODE_HINTS);
+    }
+
     void setShowSugg(boolean on) {
         showSugg = on;
         selManual = false;
@@ -391,7 +406,7 @@ public class AimView extends View {
     private float power() {
         if (!powerAuto) return powerManual;
         if (cueIdx >= 0 && isBreak()) return 1f;
-        if (!showSugg || perBall.isEmpty()) return 0.7f;
+        if (perBall.isEmpty()) return 0.7f;
         return powerAuto ? perBall.get(sel).recPower() : powerManual;
     }
 
@@ -475,6 +490,10 @@ public class AimView extends View {
         }
         if (!tableReady) return;
 
+        if (mode == MODE_ONE) {
+            drawOneLine(c);
+            return;
+        }
         c.drawRect(L, T, R, B, pTable);
         float[] pk = Geo.pockets(L, T, R, B);
         for (int i = 0; i < 6; i++) c.drawCircle(pk[2 * i], pk[2 * i + 1], r * 0.7f, pPocket);
@@ -591,6 +610,117 @@ public class AimView extends View {
                 ? c.saveLayerAlpha(0, 0, getWidth(), getHeight(), Math.round(255 * predAlpha)) : -1;
         drawPredictionInner(c);
         if (layer >= 0) c.restoreToCount(layer);
+    }
+
+    // ---------------------------------------------------------------- режим «одна линия от кия»
+
+    /**
+     * Одна линия от битка: если игра показывает свою линию прицела — по ней (с отскоками) до шара,
+     * и куда этот шар покатится; если нет — один самый простой удар. Больше ничего.
+     */
+    private void drawOneLine(Canvas c) {
+        if (cueIdx < 0 || cueIdx >= balls.size()) return;
+        Geo.Ball cb = balls.get(cueIdx);
+        c.drawCircle(cb.x, cb.y, r + 2 * dp, pCueThin);
+        if (sim != null && predAlpha > 0.02f) {
+            int layer = predAlpha < 0.99f
+                    ? c.saveLayerAlpha(0, 0, getWidth(), getHeight(), Math.round(255 * predAlpha)) : -1;
+            drawOneFromSim(c, cb);
+            if (layer >= 0) c.restoreToCount(layer);
+            if (predAlpha > 0.98f) return;
+        }
+        if (!perBall.isEmpty()) {
+            int layer = predAlpha > 0.02f
+                    ? c.saveLayerAlpha(0, 0, getWidth(), getHeight(), Math.round(255 * (1 - predAlpha))) : -1;
+            drawOneFromShot(c, cb, perBall.get(sel));
+            if (layer >= 0) c.restoreToCount(layer);
+        } else if (isBreak()) {
+            int near = nearestTarget();
+            if (near >= 0) {
+                Geo.Ball nb = balls.get(near);
+                lineFromCue(c, new float[]{cb.x, cb.y, nb.x, nb.y}, pOne, r + 3 * dp);
+                pText.setColor(0xFFFFAB40);
+                labelAt(c, "РАЗБОЙ: в первый шар, сила 100%", cb.x, cb.y, null);
+            }
+        }
+    }
+
+    private void drawOneFromSim(Canvas c, Geo.Ball cb) {
+        Sim.Result sm = sim;
+        float[] cp = sm.paths[cueIdx];
+        if (cp == null) return;
+        int hitN = sm.firstHit >= 0 && sm.cueHitLen >= 4 ? Math.min(sm.cueHitLen, cp.length) : cp.length;
+        float[] toHit = java.util.Arrays.copyOf(cp, hitN);
+        lineFromCue(c, toHit, pOne, sm.firstHit >= 0 ? r : 0);
+        float[] pk = Geo.pockets(L, T, R, B);
+        String t;
+        int tc;
+        if (sm.firstHit >= 0) {
+            float hx = toHit[hitN - 2], hy = toHit[hitN - 1];
+            c.drawCircle(hx, hy, r, pOneGhost);
+            float[] op = sm.paths[sm.firstHit];
+            int col = visible(colorOf(sm.firstHit));
+            if (op != null) {
+                pOneObj.setColor(col);
+                drawPoly(c, trimStart(op, r + 2 * dp), pOneObj);
+            }
+            if (sm.potted[sm.firstHit]) {
+                int q = sm.pocketOf[sm.firstHit];
+                c.drawCircle(pk[2 * q], pk[2 * q + 1], r * 1.25f, pObj);
+                t = "✓ В ЛУЗУ";
+                tc = 0xFF69F0AE;
+            } else {
+                t = "мимо";
+                tc = 0xFFFF9100;
+            }
+        } else {
+            t = sm.cuePotted ? "" : "не попадёт в шар";
+            tc = 0xFFFF9100;
+        }
+        if (sm.cuePotted) {
+            t = (t.isEmpty() ? "" : t + "   ") + "⚠ биток в лузу";
+            tc = 0xFFFF5252;
+        }
+        pText.setColor(tc);
+        float lx = sm.firstHit >= 0 ? simX[sm.firstHit] : cb.x, ly = sm.firstHit >= 0 ? simY[sm.firstHit] : cb.y;
+        labelAt(c, t + "   сила " + pct(power()), lx, ly + 3.2f * r, null);
+    }
+
+    private void drawOneFromShot(Canvas c, Geo.Ball cb, Geo.Shot s) {
+        lineFromCue(c, s.cuePath, pOne, r);
+        c.drawCircle(s.gx, s.gy, r, pOneGhost);
+        drawPoly(c, trimStart(s.objPath, r + 3 * dp), pObj);
+        float[] pk = Geo.pockets(L, T, R, B);
+        c.drawCircle(s.px, s.py, r * 1.1f, pObj);
+        String via = s.objCush == 1 ? " · борт" : s.objCush == 2 ? " · 2 борта" : "";
+        if (s.cueCush > 0) via += " · биток через борт";
+        pText.setColor(s.cut < 30 ? 0xFF69F0AE : s.cut < 60 ? 0xFFFFD740 : 0xFFFF5252);
+        labelAt(c, Math.round(s.cut) + "°" + via + "   сила " + pct(power()), s.ox, s.oy, null);
+    }
+
+    /**
+     * Линия от края битка. Возле битка (там игра рисует свою белую линию прицела) — «коридор» из двух тонких
+     * линий по бокам, чтобы не закрывать линию игры; дальше — сплошная линия. endTrim — укоротить конец.
+     */
+    private void lineFromCue(Canvas c, float[] pts, Paint p, float endTrim) {
+        if (pts == null || pts.length < 4) return;
+        float[] q = endTrim > 0 ? trimEnd(pts, endTrim) : pts;
+        if (q == null || q.length < 4) return;
+        float cx = pts[0], cy = pts[1], zone = guideZone();
+        float dx = q[2] - q[0], dy = q[3] - q[1];
+        float l = (float) Math.hypot(dx, dy);
+        if (l > 1e-3f) {
+            dx /= l;
+            dy /= l;
+            float a = r + 3 * dp, b = Math.min(zone, l);
+            if (b > a) {
+                float ox = -dy * 3.5f * dp, oy = dx * 3.5f * dp;
+                c.drawLine(cx + dx * a + ox, cy + dy * a + oy, cx + dx * b + ox, cy + dy * b + oy, pRail);
+                c.drawLine(cx + dx * a - ox, cy + dy * a - oy, cx + dx * b - ox, cy + dy * b - oy, pRail);
+            }
+        }
+        drawPolyZ(c, q, p, cx, cy, zone);
+        bounces(c, q);
     }
 
     private void drawPredictionInner(Canvas c) {
